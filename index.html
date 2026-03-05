@@ -1,0 +1,3186 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Here Comes The Bride</title>
+<style>
+  *, *::before, *::after {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+  }
+  html, body {
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    background: #000;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+  }
+  canvas {
+    display: block;
+    image-rendering: pixelated;
+    image-rendering: crisp-edges;
+    touch-action: none;
+    -webkit-touch-callout: none;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<script>
+(() => {
+  const CANVAS_W = 800;
+  const CANVAS_H = 450;
+  const FIXED_DT = 1000 / 60;
+  const GROUND_Y = 370;
+  const GRAVITY = 0.7;
+  const JUMP_VEL = -13.5;
+  const P = 3;
+
+  const BASE_SPEED = 4.5;
+  const SPEED_INCREASE = 0.0003;
+  const MAX_SPEED = 8;
+  const WIN_DISTANCE = 12000;
+
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  canvas.width = CANVAS_W;
+  canvas.height = CANVAS_H;
+
+  function resize() {
+    const scaleX = window.innerWidth / CANVAS_W;
+    const scaleY = window.innerHeight / CANVAS_H;
+    const scale = Math.min(scaleX, scaleY);
+    canvas.style.width = (CANVAS_W * scale) + 'px';
+    canvas.style.height = (CANVAS_H * scale) + 'px';
+  }
+  window.addEventListener('resize', resize);
+  resize();
+  document.addEventListener('touchmove', (e) => e.preventDefault(), { passive: false });
+  document.addEventListener('gesturestart', (e) => e.preventDefault());
+
+  function mulberry32(a) {
+    return function() {
+      a |= 0; a = a + 0x6D2B79F5 | 0;
+      let t = Math.imul(a ^ a >>> 15, 1 | a);
+      t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+      return ((t ^ t >>> 14) >>> 0) / 4294967296;
+    };
+  }
+
+  // ============================================================
+  // BACKGROUND LAYERS (unchanged)
+  // ============================================================
+  const PETAL_COUNT = 25;
+  const petals = [];
+  {
+    const rng = mulberry32(12345);
+    for (let i = 0; i < PETAL_COUNT; i++) {
+      petals.push({
+        x: rng() * CANVAS_W,
+        y: rng() * CANVAS_H * 0.8,
+        size: 2 + rng() * 3,
+        drift: 0.2 + rng() * 0.4,
+        fall: 0.15 + rng() * 0.3,
+        phase: rng() * Math.PI * 2,
+        color: rng() > 0.5 ? '#ffb6c1' : (rng() > 0.5 ? '#ffc0cb' : '#ffe4e9')
+      });
+    }
+  }
+
+  const FAR_TILE_W = 1600;
+  const farHillCanvas = document.createElement('canvas');
+  farHillCanvas.width = FAR_TILE_W;
+  farHillCanvas.height = CANVAS_H;
+  {
+    const fc = farHillCanvas.getContext('2d');
+    // Soft green rolling hills
+    fc.fillStyle = '#7aab6d';
+    fc.beginPath(); fc.moveTo(0, CANVAS_H);
+    for (let x = 0; x <= FAR_TILE_W; x += 2) {
+      fc.lineTo(x, 270 + Math.sin(x*0.004)*35 + Math.sin(x*0.0087)*20 + Math.sin(x*0.002)*15);
+    }
+    fc.lineTo(FAR_TILE_W, CANVAS_H); fc.closePath(); fc.fill();
+    // Gentle rounded trees (lush, not bare)
+    const farTrees = [{x:120,r:28},{x:400,r:22},{x:700,r:32},{x:1000,r:24},{x:1300,r:26},{x:1500,r:20}];
+    for (const t of farTrees) {
+      const by = 270+Math.sin(t.x*0.004)*35+Math.sin(t.x*0.0087)*20+Math.sin(t.x*0.002)*15;
+      // Trunk
+      fc.fillStyle = '#6b8e5a';
+      fc.fillRect(t.x-2, by-t.r*1.8, 4, t.r*1.8);
+      // Round canopy
+      fc.fillStyle = '#5d8a50';
+      fc.beginPath(); fc.arc(t.x, by-t.r*2, t.r, 0, Math.PI*2); fc.fill();
+      fc.fillStyle = '#6d9a5e';
+      fc.beginPath(); fc.arc(t.x-t.r*0.3, by-t.r*2.2, t.r*0.7, 0, Math.PI*2); fc.fill();
+    }
+  }
+
+  const MID_TILE_W = 1600;
+  const midCanvas = document.createElement('canvas');
+  midCanvas.width = MID_TILE_W; midCanvas.height = CANVAS_H;
+  {
+    const mc = midCanvas.getContext('2d');
+    const rng = mulberry32(11111);
+    const flowerColors = ['#ff8fab','#ffb3c6','#ffffff','#ffc2d1','#fb6f92'];
+
+    // Rose bushes — lush green with flowers
+    const bushes = [{x:80,r:28},{x:300,r:24},{x:550,r:30},{x:750,r:22},{x:1000,r:26},{x:1200,r:28},{x:1450,r:24}];
+    for (const b of bushes) {
+      const by = GROUND_Y;
+      // Green bush body
+      mc.fillStyle = '#4a8c3f';
+      mc.beginPath(); mc.arc(b.x, by-b.r*0.6, b.r, Math.PI, 0); mc.fill();
+      mc.fillStyle = '#3d7a35';
+      mc.beginPath(); mc.arc(b.x-b.r*0.4, by-b.r*0.7, b.r*0.6, Math.PI, 0); mc.fill();
+      mc.fillStyle = '#55a048';
+      mc.beginPath(); mc.arc(b.x+b.r*0.3, by-b.r*0.8, b.r*0.5, Math.PI, 0); mc.fill();
+      // Flowers on top
+      for (let f = 0; f < 8; f++) {
+        const fx = b.x + (rng()-0.5)*b.r*1.4;
+        const fy = by - b.r*0.4 - rng()*b.r*0.8;
+        mc.fillStyle = flowerColors[Math.floor(rng()*flowerColors.length)];
+        mc.beginPath(); mc.arc(fx, fy, 3+rng()*2, 0, Math.PI*2); mc.fill();
+      }
+    }
+
+    // Floral arches — wedding arch silhouettes
+    const arches = [{x:200},{x:650},{x:1100},{x:1500}];
+    for (const a of arches) {
+      const ay = GROUND_Y, ah = 100, aw = 50;
+      // White posts
+      mc.fillStyle = '#f0ece4';
+      mc.fillRect(a.x-aw/2, ay-ah, 5, ah);
+      mc.fillRect(a.x+aw/2-5, ay-ah, 5, ah);
+      // Arch curve
+      mc.strokeStyle = '#f0ece4'; mc.lineWidth = 5;
+      mc.beginPath(); mc.arc(a.x, ay-ah, aw/2, Math.PI, 0); mc.stroke();
+      // Flowers draped on arch
+      for (let f = 0; f < 12; f++) {
+        const angle = Math.PI + (f / 11) * Math.PI;
+        const fx = a.x + Math.cos(angle) * (aw/2 + (rng()-0.5)*6);
+        const fy = ay - ah + Math.sin(angle) * (aw/2 + (rng()-0.5)*6);
+        mc.fillStyle = flowerColors[Math.floor(rng()*flowerColors.length)];
+        mc.beginPath(); mc.arc(fx, fy, 3+rng()*2, 0, Math.PI*2); mc.fill();
+      }
+      // Vine tendrils on posts
+      mc.fillStyle = '#5a9e4b';
+      for (let v = 0; v < 6; v++) {
+        const vy = ay - rng()*ah;
+        mc.fillRect(a.x-aw/2-2, vy, 3, 3);
+        mc.fillRect(a.x+aw/2, vy+5, 3, 3);
+      }
+    }
+
+    // Garden gazebo (replaces dark building)
+    const gx = 420, gw = 60, gh = 90, gt = GROUND_Y - gh;
+    // White pillars
+    mc.fillStyle = '#f5f0e8';
+    mc.fillRect(gx, gt+15, 5, gh-15);
+    mc.fillRect(gx+gw-5, gt+15, 5, gh-15);
+    mc.fillRect(gx+gw/2-2, gt+15, 4, gh-15);
+    // Peaked roof
+    mc.fillStyle = '#e8d5c0';
+    mc.beginPath(); mc.moveTo(gx-8, gt+15); mc.lineTo(gx+gw/2, gt-5); mc.lineTo(gx+gw+8, gt+15); mc.closePath(); mc.fill();
+    mc.fillStyle = '#f5f0e8';
+    mc.fillRect(gx-6, gt+13, gw+12, 4);
+    // Hanging flowers from roof
+    for (let f = 0; f < 5; f++) {
+      const hx = gx + 8 + f * 12;
+      mc.fillStyle = '#5a9e4b'; mc.fillRect(hx, gt+17, 2, 6+rng()*4);
+      mc.fillStyle = flowerColors[Math.floor(rng()*flowerColors.length)];
+      mc.beginPath(); mc.arc(hx+1, gt+25+rng()*3, 3, 0, Math.PI*2); mc.fill();
+    }
+  }
+
+  const GND_TILE_W = 800;
+  const groundCanvas = document.createElement('canvas');
+  groundCanvas.width = GND_TILE_W; groundCanvas.height = CANVAS_H;
+  {
+    const gc = groundCanvas.getContext('2d'); const rng = mulberry32(99999);
+    // Lush green grass border
+    gc.fillStyle='#6abf4b'; gc.fillRect(0,GROUND_Y,GND_TILE_W,10);
+    // Warm tan garden path
+    gc.fillStyle='#d4b896'; gc.fillRect(0,GROUND_Y+10,GND_TILE_W,CANVAS_H-GROUND_Y-10);
+    // Path texture — subtle stone/gravel
+    for (let i=0;i<80;i++) { gc.fillStyle=rng()>0.5?'#c9a882':'#bfa07a'; gc.fillRect(Math.floor(rng()*GND_TILE_W),GROUND_Y+12+Math.floor(rng()*(CANVAS_H-GROUND_Y-14)),3+Math.floor(rng()*4),2); }
+    // Grass tufts — brighter greens
+    for (let i=0;i<60;i++) { const gx=Math.floor(rng()*GND_TILE_W), tall=3+Math.floor(rng()*6); gc.fillStyle=rng()>0.3?'#5cb840':'#48a032'; gc.fillRect(gx,GROUND_Y-tall,2,tall); if(rng()>0.5) gc.fillRect(gx+2,GROUND_Y-tall+2,2,tall-2); }
+    // Scattered flower petals (pink/white)
+    const pc=['#ffb6c1','#ffc0cb','#ffe4e9','#ffffff','#ff8fab'];
+    for (let i=0;i<45;i++) { gc.fillStyle=pc[Math.floor(rng()*pc.length)]; const lx=Math.floor(rng()*GND_TILE_W), ly=GROUND_Y+Math.floor(rng()*8); gc.fillRect(lx,ly,3,2); if(rng()>0.5) gc.fillRect(lx+1,ly-1,2,1); }
+  }
+
+  const skyCanvas = document.createElement('canvas');
+  skyCanvas.width = CANVAS_W; skyCanvas.height = CANVAS_H;
+  {
+    const sc = skyCanvas.getContext('2d');
+    const grad = sc.createLinearGradient(0,0,0,CANVAS_H*0.85);
+    grad.addColorStop(0,'#87CEEB'); grad.addColorStop(0.4,'#f6c9a0'); grad.addColorStop(0.7,'#f4a460'); grad.addColorStop(1,'#e8836b');
+    sc.fillStyle = grad; sc.fillRect(0,0,CANVAS_W,CANVAS_H);
+  }
+
+  // ============================================================
+  // OBSTACLE TYPES
+  // ============================================================
+  const OBSTACLE_TYPES = [
+    { label: 'Mother-in-Law', w: 42, h: 50, floating: false },
+    { label: 'Drunk Uncle',   w: 40, h: 50, floating: false },
+    { label: 'Photographer',  w: 44, h: 48, floating: false },
+    { label: 'Crying Baby',   w: 30, h: 35, floating: false },
+    { label: 'Flower Girl',   w: 36, h: 65, floating: false },  // tall — throws flaming flowers
+    { label: 'Rain Cloud',    w: 44, h: 30, floating: true  },  // airborne — run under or time jump
+  ];
+  const GROUND_OBSTACLE_COUNT = 5; // types 0-4 are ground, 5 is floating
+  let flamingFlowers = []; // projectiles from Flower Girl
+
+
+  // ============================================================
+  // COLLECTIBLE CONFIG
+  // ============================================================
+  // 0=heart(5%), 1=ring(65%), 2=champagne(10%), 3=bouquet(5%), 4=tiara(8%), 5=magnet(7%)
+  const COLLECT_COLORS = ['#ff6b9d', '#ffd700', '#2d8a2d', '#ff69b4', '#e0b0ff', '#00e5ff'];
+  const RAINBOW_COLORS = ['#ff6b9d','#ffd700','#7fff00','#00bfff','#ff69b4','#ffa500'];
+  let lastEffectSpawn = 0; // frame when last effect item (2-5) spawned
+  let spawnedEffects = new Set(); // track which effect types (2-5) have appeared
+  // Guarantee each effect spawns at least once by these distance thresholds
+  const EFFECT_GUARANTEES = [
+    { type: 2, dist: 3000 },  // Champagne by 3000
+    { type: 4, dist: 5000 },  // Tiara by 5000
+    { type: 5, dist: 7000 },  // Magnet by 7000
+    { type: 3, dist: 9000 },  // Bouquet by 9000
+  ];
+
+  function pickCollectType() {
+    // Check if any guaranteed effect is overdue
+    for (const g of EFFECT_GUARANTEES) {
+      if (distanceTraveled >= g.dist && !spawnedEffects.has(g.type)) {
+        return g.type;
+      }
+    }
+    const r = Math.random();
+    // Hearts only appear after distance 3000
+    if (distanceTraveled > 3000 && r < 0.05) return 0; // Heart 5%
+    const base = distanceTraveled > 3000 ? 0.05 : 0;
+    // If an effect item spawned recently (within ~4s), force a ring
+    const effectCooldown = frameTick - lastEffectSpawn < 240;
+    if (effectCooldown || r < base + 0.65) return 1; // Ring 65%
+    if (r < base + 0.75) return 2;  // Champagne 10%
+    if (r < base + 0.80) return 3;  // Bouquet 5%
+    if (r < base + 0.88) return 4;  // Tiara 8%
+    return 5;                        // Magnet 7%
+  }
+
+  // ============================================================
+  // GAME STATE
+  // ============================================================
+  const State = { TITLE: 'title', NAME_ENTRY: 'name_entry', HELP: 'help', READY: 'ready', PLAYING: 'playing', GAMEOVER: 'gameover', WIN: 'win' };
+  let gameState = State.TITLE;
+  let readyTimer = 0;
+  let frameTick = 0;
+  let scrollX = 0;
+  let jumpRequested = false;
+
+  let gameSpeed = BASE_SPEED;
+  let effectiveSpeed = BASE_SPEED;
+  let distanceTraveled = 0;
+  let obstacles = [];
+  let spawnTimer = 90;
+  let patternQueue = [];
+  let hp = 3;
+  let flashTimer = 0;
+  let score = 0;
+  let highScore = 0;
+  let isNewHighScore = false;
+  let highScoreRank = -1; // 0-based rank if new high score, -1 if not
+
+  // Persistent top-10 leaderboard (entries: {score, name})
+  const LS_KEY = 'hctb-top-scores';
+  function loadTopScores() {
+    try {
+      const data = JSON.parse(localStorage.getItem(LS_KEY));
+      if (Array.isArray(data)) {
+        return data.slice(0, 10).filter(e => e && e.score > 0);
+      }
+    } catch(e) {}
+    return [];
+  }
+  function saveTopScores(entries) {
+    try { localStorage.setItem(LS_KEY, JSON.stringify(entries.slice(0, 10))); } catch(e) {}
+  }
+  function submitScore(s) {
+    if (s <= 0) { isNewHighScore = false; highScoreRank = -1; return; }
+    const entries = loadTopScores();
+    const entry = { score: s, name: playerName || '???' };
+    // Find rank
+    let rank = entries.length;
+    for (let i = 0; i < entries.length; i++) {
+      if (s > entries[i].score) { rank = i; break; }
+    }
+    if (rank < 10) {
+      entries.splice(rank, 0, entry);
+      if (entries.length > 10) entries.length = 10;
+      saveTopScores(entries);
+      isNewHighScore = true;
+      highScoreRank = rank;
+    } else {
+      isNewHighScore = false;
+      highScoreRank = -1;
+    }
+    highScore = entries.length > 0 ? entries[0].score : 0;
+  }
+  // One-time reset: clear old scores (format changed to {score, name})
+  { try {
+    if (!localStorage.getItem('hctb-v2-migrated')) {
+      localStorage.removeItem(LS_KEY);
+      localStorage.setItem('hctb-v2-migrated', '1');
+    }
+  } catch(e) {} }
+  // Load on init
+  { const entries = loadTopScores(); highScore = entries.length > 0 ? entries[0].score : 0; }
+
+  // Player name (persistent)
+  const LS_NAME_KEY = 'hctb-player-name';
+  let playerName = '';
+  let nameEntryBuffer = '';
+  let nameEntryIsChange = false; // true when changing name from title, false on first launch
+  function loadPlayerName() {
+    try { return localStorage.getItem(LS_NAME_KEY) || ''; } catch(e) { return ''; }
+  }
+  function savePlayerName(name) {
+    try { localStorage.setItem(LS_NAME_KEY, name); } catch(e) {}
+  }
+  playerName = loadPlayerName();
+
+  // Game over sequence
+  // Phases: 0=stumble (15 frames), 1=pause (30 frames), 2=overlay fade
+  let gameOverPhase = 0;
+  let gameOverTimer = 0;
+  let shakeTimer = 0;
+  let firstPlay = true;
+  let jumpHintTimer = 0;
+
+  // Collectibles
+  let collectibles = [];
+  let collectSpawnTimer = 60;
+
+  // Champagne boost
+  let boostTimer = 0;
+  let invincibleTimer = 0;
+  let multiplierTimer = 0;  // Tiara 2x score (480 frames = 8s)
+  let magnetTimer = 0;      // Magnet pull (300 frames = 5s)
+  let champagneCount = 0;   // Track champagnes for speed bonus
+
+  // Particles, sparkles, floating text
+  let particles = [];
+  let sparkles = [];
+  let floatingTexts = [];
+
+  // Time bonus
+  let playFrames = 0;      // frames spent in PLAYING state
+  let timeBonus = 1;       // multiplier applied at win
+  let finalScore = 0;      // score after time bonus
+
+  // Win sequence
+  // Phases: 0=slowing, 1=altar slides in, 2=Amanda approaches,
+  //         3=kiss moment (flash+confetti+heart), 4=hold 1s, 5=overlay fade
+  let winPhase = 0;
+  let winTimer = 0;
+  let winScrollSpeed = 0;
+  let anthonyX = 0;
+  let altarX = 0;
+  const ALTAR_TARGET = 570;
+  const AMANDA_MEET_X = 535;
+  let confetti = [];
+  let kissHeartScale = 0;
+  let screenFlash = 0;
+
+  // Title screen ambient confetti
+  let titleConfetti = [];
+
+  // ============================================================
+  // PLAYER
+  // ============================================================
+  const player = {
+    x: 120, y: GROUND_Y, vy: 0,
+    grounded: true, animFrame: 0, animTimer: 0,
+    jumpsLeft: 2,
+  };
+
+  // ============================================================
+  // RESET
+  // ============================================================
+  function resetGame() {
+    gameState = State.TITLE;
+    readyTimer = 0;
+    frameTick = 0;
+    scrollX = 0;
+    jumpRequested = false;
+    gameSpeed = BASE_SPEED;
+    effectiveSpeed = BASE_SPEED;
+    distanceTraveled = 0;
+    obstacles = [];
+    flamingFlowers = [];
+    spawnTimer = 90;
+    patternQueue = [];
+    hp = 3;
+    flashTimer = 0;
+    score = 0;
+    gameOverPhase = 0;
+    gameOverTimer = 0;
+    shakeTimer = 0;
+    collectibles = [];
+    collectSpawnTimer = 60;
+    boostTimer = 0;
+    invincibleTimer = 0;
+    multiplierTimer = 0;
+    magnetTimer = 0;
+    champagneCount = 0;
+    lastEffectSpawn = 0;
+    spawnedEffects = new Set();
+    particles = [];
+    sparkles = [];
+    floatingTexts = [];
+    playFrames = 0;
+    timeBonus = 1;
+    finalScore = 0;
+    winPhase = 0;
+    winTimer = 0;
+    winScrollSpeed = 0;
+    confetti = [];
+    kissHeartScale = 0;
+    screenFlash = 0;
+    titleConfetti = [];
+    spawnTitleConfetti();
+    player.x = 120;
+    player.y = GROUND_Y;
+    player.vy = 0;
+    player.grounded = true;
+    player.jumpsLeft = 2;
+    player.animFrame = 0;
+    player.animTimer = 0;
+    // Stop any playing music (game music, bridal chorus) and start title music
+    stopMusic();
+    stopBridalChorus();
+    if (audioCtx) startMusic(scheduleTitleMusicLoop);
+  }
+
+  // ============================================================
+  // INPUT
+  // ============================================================
+  function startPlaying() {
+    scrollX = 0;
+    jumpRequested = false;
+    gameSpeed = BASE_SPEED;
+    effectiveSpeed = BASE_SPEED;
+    distanceTraveled = 0;
+    obstacles = [];
+    flamingFlowers = [];
+    spawnTimer = 90;
+    patternQueue = [];
+    hp = 3;
+    flashTimer = 0;
+    score = 0;
+    gameOverPhase = 0;
+    gameOverTimer = 0;
+    shakeTimer = 0;
+    collectibles = [];
+    collectSpawnTimer = 60;
+    boostTimer = 0;
+    invincibleTimer = 0;
+    multiplierTimer = 0;
+    magnetTimer = 0;
+    champagneCount = 0;
+    lastEffectSpawn = 0;
+    spawnedEffects = new Set();
+    particles = [];
+    sparkles = [];
+    floatingTexts = [];
+    playFrames = 0;
+    timeBonus = 1;
+    finalScore = 0;
+    player.x = 120;
+    player.y = GROUND_Y;
+    player.vy = 0;
+    player.grounded = true;
+    player.jumpsLeft = 2;
+    player.animFrame = 0;
+    player.animTimer = 0;
+    gameState = State.READY;
+    readyTimer = 0;
+    stopMusic();
+    sfxStart();
+  }
+
+  let hasInteracted = false; // tracks whether user has had their "first tap" to unlock audio
+  function handleAction() {
+    initAudio();
+    if (gameState === State.TITLE) {
+      // First interaction on fresh page load: just unlock audio & start title music
+      if (!hasInteracted) {
+        hasInteracted = true;
+        if (!musicPlaying) startMusic(scheduleTitleMusicLoop);
+        return;
+      }
+      stopMusic();       // stop title music
+      sfxStart();        // play "start!" jingle
+      if (!playerName) {
+        // First time: ask for name
+        gameState = State.NAME_ENTRY;
+        nameEntryBuffer = '';
+        nameEntryIsChange = false;
+      } else {
+        gameState = State.READY;
+        readyTimer = 0;
+        if (firstPlay) { jumpHintTimer = 180; firstPlay = false; }
+      }
+    } else if (gameState === State.HELP) {
+      gameState = State.TITLE;
+    } else if (gameState === State.NAME_ENTRY) {
+      // Handled by keydown listener
+    } else if (gameState === State.READY) {
+      // Ignore inputs during ready countdown
+    } else if (gameState === State.PLAYING) {
+      jumpRequested = true;
+    } else if (gameState === State.GAMEOVER && gameOverPhase === 2 && gameOverTimer > 60) {
+      startPlaying();
+    } else if (gameState === State.WIN && winPhase === 5 && winTimer > 90) {
+      resetGame();
+    }
+  }
+
+  window.addEventListener('keydown', (e) => {
+    // Name entry keyboard handling
+    if (gameState === State.NAME_ENTRY) {
+      e.preventDefault();
+      if (e.code === 'Enter' && nameEntryBuffer.trim().length > 0) {
+        playerName = nameEntryBuffer.trim();
+        savePlayerName(playerName);
+        if (nameEntryIsChange) {
+          gameState = State.TITLE;
+        } else {
+          gameState = State.READY;
+          readyTimer = 0;
+          if (firstPlay) { jumpHintTimer = 180; firstPlay = false; }
+        }
+      } else if (e.code === 'Backspace') {
+        nameEntryBuffer = nameEntryBuffer.slice(0, -1);
+      } else if (e.key.length === 1 && nameEntryBuffer.length < 12) {
+        nameEntryBuffer += e.key;
+      }
+      return;
+    }
+    if ((gameState === State.TITLE || gameState === State.HELP) && (e.code === 'KeyH' || e.key === 'h' || e.key === 'H')) {
+      e.preventDefault();
+      gameState = gameState === State.HELP ? State.TITLE : State.HELP;
+      return;
+    }
+    if (e.code === 'KeyM' || e.key === 'm' || e.key === 'M') {
+      e.preventDefault();
+      initAudio(); muted = !muted; updateMusicMute();
+      return;
+    }
+    if (gameState === State.TITLE && (e.code === 'KeyN' || e.key === 'n' || e.key === 'N')) {
+      e.preventDefault();
+      gameState = State.NAME_ENTRY;
+      nameEntryBuffer = playerName || '';
+      nameEntryIsChange = true;
+      return;
+    }
+    if (e.code === 'Space' || e.code === 'Enter') {
+      e.preventDefault();
+      handleAction();
+    }
+    if (gameState === State.PLAYING && e.code === 'ArrowUp') {
+      e.preventDefault();
+      jumpRequested = true;
+    }
+  });
+  canvas.addEventListener('touchstart', (e) => {
+    e.preventDefault();
+    const touch = e.touches[0];
+    const c = getCanvasCoords(touch.clientX, touch.clientY);
+    if (isMuteClick(c.x, c.y)) { initAudio(); muted = !muted; updateMusicMute(); return; }
+    handleAction();
+  }, { passive: false });
+  canvas.addEventListener('click', (e) => {
+    const c = getCanvasCoords(e.clientX, e.clientY);
+    if (isMuteClick(c.x, c.y)) { initAudio(); muted = !muted; updateMusicMute(); return; }
+    handleAction();
+  });
+
+  // ============================================================
+  // AUDIO
+  // ============================================================
+  let audioCtx = null;
+  let muted = false;
+
+  function initAudio() {
+    if (audioCtx) return;
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  }
+
+  // Unlock audio and start title music on first user gesture
+  let titleAudioStarted = false;
+  function tryStartTitleAudio() {
+    if (titleAudioStarted) return;
+    initAudio();
+    if (audioCtx && gameState === State.TITLE && !musicPlaying) {
+      startMusic(scheduleTitleMusicLoop);
+      titleAudioStarted = true;
+    }
+  }
+  // Many browsers unlock AudioContext on any of these gestures
+  ['click','touchstart','keydown','pointerdown'].forEach(evt =>
+    document.addEventListener(evt, tryStartTitleAudio, { once: false, passive: true })
+  );
+
+  function playTone(freq, duration, type, vol, slide) {
+    if (!audioCtx || muted) return;
+    const o = audioCtx.createOscillator();
+    const g = audioCtx.createGain();
+    o.type = type || 'square';
+    o.frequency.setValueAtTime(freq, audioCtx.currentTime);
+    if (slide) o.frequency.linearRampToValueAtTime(slide, audioCtx.currentTime + duration);
+    g.gain.setValueAtTime(vol || 0.08, audioCtx.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + duration);
+    o.connect(g);
+    g.connect(audioCtx.destination);
+    o.start();
+    o.stop(audioCtx.currentTime + duration);
+  }
+
+  function sfxJump() { playTone(300, 0.12, 'square', 0.07, 600); }
+  function sfxCollect() { playTone(880, 0.08, 'square', 0.06); playTone(1320, 0.1, 'square', 0.05); }
+  function sfxDamage() { playTone(100, 0.2, 'sawtooth', 0.08, 60); }
+  function sfxLose() {
+    if (!audioCtx || muted) return;
+    const t = audioCtx.currentTime;
+    [400, 350, 280, 200].forEach((f, i) => {
+      const o = audioCtx.createOscillator();
+      const g = audioCtx.createGain();
+      o.type = 'sawtooth';
+      o.frequency.setValueAtTime(f, t + i * 0.18);
+      g.gain.setValueAtTime(0.06, t + i * 0.18);
+      g.gain.exponentialRampToValueAtTime(0.001, t + i * 0.18 + 0.3);
+      o.connect(g); g.connect(audioCtx.destination);
+      o.start(t + i * 0.18);
+      o.stop(t + i * 0.18 + 0.3);
+    });
+  }
+  function sfxWin() {
+    if (!audioCtx || muted) return;
+    const t = audioCtx.currentTime;
+    [523, 659, 784, 1047].forEach((f, i) => {
+      const o = audioCtx.createOscillator();
+      const g = audioCtx.createGain();
+      o.type = 'square';
+      o.frequency.setValueAtTime(f, t + i * 0.15);
+      g.gain.setValueAtTime(0.06, t + i * 0.15);
+      g.gain.exponentialRampToValueAtTime(0.001, t + i * 0.15 + 0.25);
+      o.connect(g); g.connect(audioCtx.destination);
+      o.start(t + i * 0.15);
+      o.stop(t + i * 0.15 + 0.25);
+    });
+  }
+  function sfxHighScore() {
+    if (!audioCtx || muted) return;
+    const t = audioCtx.currentTime;
+    // Triumphant ascending fanfare — longer and grander than sfxWin
+    [523, 659, 784, 880, 1047, 1319, 1568].forEach((f, i) => {
+      const o = audioCtx.createOscillator();
+      const g = audioCtx.createGain();
+      o.type = 'square';
+      o.frequency.setValueAtTime(f, t + i * 0.12);
+      g.gain.setValueAtTime(0.07, t + i * 0.12);
+      g.gain.exponentialRampToValueAtTime(0.001, t + i * 0.12 + 0.3);
+      o.connect(g); g.connect(audioCtx.destination);
+      o.start(t + i * 0.12);
+      o.stop(t + i * 0.12 + 0.3);
+    });
+  }
+
+  function sfxInvincible() {
+    if (!audioCtx || muted) return;
+    const t = audioCtx.currentTime;
+    [660, 880, 1047, 1175, 1320, 1568, 1760].forEach((f, i) => {
+      const o = audioCtx.createOscillator();
+      const g = audioCtx.createGain();
+      o.type = 'square';
+      o.frequency.setValueAtTime(f, t + i * 0.08);
+      g.gain.setValueAtTime(0.07, t + i * 0.08);
+      g.gain.exponentialRampToValueAtTime(0.001, t + i * 0.08 + 0.2);
+      o.connect(g); g.connect(audioCtx.destination);
+      o.start(t + i * 0.08);
+      o.stop(t + i * 0.08 + 0.2);
+    });
+  }
+  function sfxSmash() {
+    if (!audioCtx || muted) return;
+    playTone(200, 0.08, 'sawtooth', 0.08, 80);
+    playTone(150, 0.06, 'square', 0.06, 400);
+  }
+
+  // ============================================================
+  // BACKGROUND MUSIC — retro chiptune
+  // ============================================================
+  let musicGain = null;
+  let musicPlaying = false;
+  let musicTimer = null;
+  let musicScheduler = null; // which loop function to use
+
+  // Note frequencies
+  const N = {
+    C3:131,D3:147,Eb3:156,E3:165,F3:175,G3:196,Ab3:208,A3:220,Bb3:233,B3:247,
+    C4:262,D4:294,Eb4:311,E4:330,F4:349,G4:392,Ab4:415,A4:440,Bb4:466,B4:494,
+    C5:523,D5:587,Eb5:622,E5:659,F5:698,G5:784,A5:880,
+    R:0
+  };
+
+  function scheduleNote(freq, startTime, dur, type, vol, gainNode) {
+    if (freq === 0 || !gainNode) return;
+    const o = audioCtx.createOscillator();
+    const g = audioCtx.createGain();
+    o.type = type;
+    o.frequency.setValueAtTime(freq, startTime);
+    g.gain.setValueAtTime(vol, startTime);
+    g.gain.setValueAtTime(vol, startTime + dur * 0.8);
+    g.gain.exponentialRampToValueAtTime(0.001, startTime + dur);
+    o.connect(g);
+    g.connect(gainNode);
+    o.start(startTime);
+    o.stop(startTime + dur);
+  }
+
+  // --- TITLE SCREEN MUSIC: gentle, dreamy music-box waltz ---
+  function scheduleTitleMusicLoop() {
+    if (!audioCtx || !musicPlaying) return;
+    const bpm = 100;
+    const beat = 60 / bpm;
+    const t = audioCtx.currentTime + 0.05;
+
+    const melody = [
+      // Gentle waltz — romantic and sweet
+      [N.E5,1],[N.D5,0.5],[N.C5,0.5],[N.D5,1],[N.E5,1],
+      [N.C5,2],[N.R,1],
+      [N.D5,1],[N.C5,0.5],[N.B4,0.5],[N.C5,1],[N.D5,1],
+      [N.B4,2],[N.R,1],
+      [N.E5,1],[N.D5,0.5],[N.C5,0.5],[N.E5,1],[N.G5,1],
+      [N.A5,1.5],[N.G5,0.5],[N.E5,1],[N.R,1],
+      [N.D5,1],[N.E5,0.5],[N.D5,0.5],[N.C5,1],[N.B4,1],
+      [N.C5,2],[N.R,2],
+    ];
+
+    const bass = [
+      [N.C3,3],[N.G3,3],[N.R,1],
+      [N.G3,3],[N.D3,3],[N.R,1],
+      [N.C3,3],[N.E3,3],[N.R,1],
+      [N.G3,3],[N.C3,3],[N.R,2],
+    ];
+
+    let melTime = t;
+    for (const [freq, dur] of melody) {
+      scheduleNote(freq, melTime, dur * beat * 0.85, 'sine', 0.03, musicGain);
+      melTime += dur * beat;
+    }
+    let bassTime = t;
+    for (const [freq, dur] of bass) {
+      scheduleNote(freq, bassTime, dur * beat * 0.8, 'triangle', 0.025, musicGain);
+      bassTime += dur * beat;
+    }
+    const loopDuration = melTime - t;
+    musicTimer = setTimeout(() => scheduleTitleMusicLoop(), (loopDuration - 0.1) * 1000);
+  }
+
+  // --- GAMEPLAY MUSIC: upbeat, happy, energetic ---
+  function scheduleGameMusicLoop() {
+    if (!audioCtx || !musicPlaying) return;
+    const bpm = 160;
+    const beat = 60 / bpm;
+    const t = audioCtx.currentTime + 0.05;
+
+    const melody = [
+      // Bar 1-2: bouncy C major joy
+      [N.C5,0.5],[N.E5,0.5],[N.G5,1],[N.E5,0.5],[N.C5,0.5],[N.D5,1],
+      [N.E5,0.5],[N.G5,0.5],[N.A5,1],[N.G5,1],[N.E5,1],
+      // Bar 3-4: rising excitement
+      [N.C5,0.5],[N.D5,0.5],[N.E5,0.5],[N.G5,0.5],[N.A5,1],[N.G5,1],
+      [N.E5,0.5],[N.D5,0.5],[N.C5,1],[N.E5,1],[N.G5,1],
+      // Bar 5-6: playful high section
+      [N.A5,1],[N.G5,0.5],[N.E5,0.5],[N.G5,0.5],[N.A5,0.5],[N.G5,1],
+      [N.E5,0.5],[N.G5,0.5],[N.A5,0.5],[N.G5,0.5],[N.E5,1],[N.C5,1],
+      // Bar 7-8: triumphant resolve
+      [N.D5,0.5],[N.E5,0.5],[N.G5,1],[N.A5,1],[N.G5,0.5],[N.E5,0.5],
+      [N.C5,1],[N.E5,0.5],[N.G5,0.5],[N.C5,1],[N.R,1],
+    ];
+
+    const bass = [
+      [N.C3,2],[N.E3,1],[N.G3,1],[N.C3,2],[N.G3,2],
+      [N.A3,2],[N.E3,2],[N.C3,2],[N.G3,2],
+      [N.A3,2],[N.E3,2],[N.G3,2],[N.C3,2],
+      [N.G3,2],[N.A3,1],[N.E3,1],[N.C3,2],[N.G3,2],
+    ];
+
+    let melTime = t;
+    for (const [freq, dur] of melody) {
+      scheduleNote(freq, melTime, dur * beat * 0.85, 'square', 0.025, musicGain);
+      melTime += dur * beat;
+    }
+    let bassTime = t;
+    for (const [freq, dur] of bass) {
+      scheduleNote(freq, bassTime, dur * beat * 0.8, 'triangle', 0.035, musicGain);
+      bassTime += dur * beat;
+    }
+    const loopDuration = melTime - t;
+    musicTimer = setTimeout(() => scheduleGameMusicLoop(), (loopDuration - 0.1) * 1000);
+  }
+
+  // --- "HERE COMES THE BRIDE" (Bridal Chorus) — one-shot for win sequence ---
+  let bridalGain = null;
+  function stopBridalChorus() {
+    if (bridalGain) {
+      try {
+        bridalGain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.2);
+        const g = bridalGain;
+        setTimeout(() => { try { g.disconnect(); } catch(e){} }, 300);
+      } catch(e) {}
+      bridalGain = null;
+    }
+  }
+  function playBridalChorus() {
+    if (!audioCtx || muted) return;
+    stopBridalChorus(); // clean up any previous instance
+    const g = audioCtx.createGain();
+    g.gain.setValueAtTime(1, audioCtx.currentTime);
+    g.connect(audioCtx.destination);
+    bridalGain = g;
+    const bpm = 100; // Moderato
+    const beat = 60 / bpm; // quarter note duration
+    const t = audioCtx.currentTime + 0.1;
+
+    // Wagner's Bridal Chorus in Bb major, 2/4 time — no intro, straight to melody
+    const melody = [
+      // m5-6: "Here comes the bride" — Bb dotted-q, Bb 8th, Bb q, Eb half tied
+      [N.Bb4, 0.75], [N.Bb4, 0.25], [N.Bb4, 1], [N.Eb5, 2],
+      // m7-8: repeat phrase
+      [N.Bb4, 0.75], [N.Bb4, 0.25], [N.Bb4, 1], [N.Eb5, 2],
+      // m9-10: "sweetly she glides" — Bb q, D5 q, C5 q, Bb q
+      [N.Bb4, 1], [N.D5, 1], [N.C5, 1], [N.Bb4, 1],
+      // m11-12: "along" — Ab dotted-q, Ab 8th, Ab q, Bb q, C5 q, rest
+      [N.Ab4, 0.75], [N.Ab4, 0.25], [N.Ab4, 0.5], [N.Bb4, 0.5], [N.C5, 1], [N.R, 1],
+      // m13-14: "Here comes the bride" again
+      [N.Bb4, 0.75], [N.Bb4, 0.25], [N.Bb4, 1], [N.Eb5, 2],
+      // m15-16: climax — F5 q, Eb5 q, D5 q, C5 q
+      [N.F5, 1], [N.Eb5, 1], [N.D5, 1], [N.C5, 1],
+      // m17-18: resolution — Bb dotted-q, Bb 8th, Bb half (held)
+      [N.Bb4, 0.75], [N.Bb4, 0.25], [N.Bb4, 1], [N.Eb5, 2],
+      // Final held note
+      [N.Bb4, 2],
+    ];
+
+    // Accompanying bass line
+    const bass = [
+      // m5-6
+      [N.Eb3, 2], [N.Bb3, 2],
+      // m7-8
+      [N.Eb3, 2], [N.Bb3, 2],
+      // m9-10
+      [N.Bb3, 1], [N.G3, 1], [N.Ab3, 1], [N.Bb3, 1],
+      // m11-12
+      [N.Ab3, 2], [N.Eb3, 1], [N.R, 1],
+      // m13-14
+      [N.Eb3, 2], [N.Bb3, 2],
+      // m15-16
+      [N.F3, 2], [N.Bb3, 2],
+      // m17-18
+      [N.Eb3, 2], [N.Bb3, 2],
+      // Final
+      [N.Bb3, 2],
+    ];
+
+    // Harmony (inner voice — chords to fill it out)
+    const harmony = [
+      // m5-6
+      [N.G4, 0.75], [N.G4, 0.25], [N.F4, 1], [N.G4, 2],
+      // m7-8
+      [N.G4, 0.75], [N.G4, 0.25], [N.F4, 1], [N.G4, 2],
+      // m9-10
+      [N.F4, 1], [N.F4, 1], [N.Eb4, 1], [N.D4, 1],
+      // m11-12
+      [N.Eb4, 0.75], [N.Eb4, 0.25], [N.Eb4, 0.5], [N.F4, 0.5], [N.Eb4, 1], [N.R, 1],
+      // m13-14
+      [N.G4, 0.75], [N.G4, 0.25], [N.F4, 1], [N.G4, 2],
+      // m15-16
+      [N.A4, 1], [N.G4, 1], [N.F4, 1], [N.Eb4, 1],
+      // m17-18
+      [N.G4, 0.75], [N.G4, 0.25], [N.F4, 1], [N.G4, 2],
+      // Final
+      [N.F4, 2],
+    ];
+
+    let melTime = t;
+    for (const [freq, dur] of melody) {
+      scheduleNote(freq, melTime, dur * beat * 0.9, 'square', 0.035, g);
+      melTime += dur * beat;
+    }
+    let bassTime = t;
+    for (const [freq, dur] of bass) {
+      scheduleNote(freq, bassTime, dur * beat * 0.85, 'triangle', 0.04, g);
+      bassTime += dur * beat;
+    }
+    let harmTime = t;
+    for (const [freq, dur] of harmony) {
+      scheduleNote(freq, harmTime, dur * beat * 0.8, 'square', 0.02, g);
+      harmTime += dur * beat;
+    }
+
+    // Fade and disconnect after melody ends
+    const totalDur = melTime - t;
+    setTimeout(() => { try { g.disconnect(); } catch(e){} if (bridalGain === g) bridalGain = null; }, (totalDur + 1) * 1000);
+  }
+
+  // --- START jingle ---
+  function sfxStart() {
+    if (!audioCtx || muted) return;
+    const t = audioCtx.currentTime;
+    // Quick ascending "Ready GO!" jingle
+    const notes = [[N.C5,0.1],[N.E5,0.1],[N.G5,0.12],[N.C5+261,0.25]]; // C5,E5,G5,C6
+    notes.forEach(([f,d], i) => {
+      const o = audioCtx.createOscillator();
+      const g = audioCtx.createGain();
+      o.type = 'square';
+      o.frequency.setValueAtTime(f, t + i * 0.1);
+      g.gain.setValueAtTime(i === 3 ? 0.09 : 0.07, t + i * 0.1);
+      g.gain.exponentialRampToValueAtTime(0.001, t + i * 0.1 + d);
+      o.connect(g); g.connect(audioCtx.destination);
+      o.start(t + i * 0.1);
+      o.stop(t + i * 0.1 + d);
+    });
+  }
+
+  function startMusic(scheduler) {
+    if (!audioCtx || musicPlaying) return;
+    musicGain = audioCtx.createGain();
+    musicGain.gain.setValueAtTime(muted ? 0 : 1, audioCtx.currentTime);
+    musicGain.connect(audioCtx.destination);
+    musicPlaying = true;
+    musicScheduler = scheduler;
+    scheduler();
+  }
+
+  function stopMusic() {
+    musicPlaying = false;
+    musicScheduler = null;
+    if (musicTimer) { clearTimeout(musicTimer); musicTimer = null; }
+    if (musicGain) {
+      try {
+        musicGain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.3);
+        setTimeout(() => { if (musicGain) { musicGain.disconnect(); musicGain = null; } }, 400);
+      } catch(e) { musicGain = null; }
+    }
+  }
+
+  function updateMusicMute() {
+    if (musicGain) {
+      musicGain.gain.setValueAtTime(muted ? 0.001 : 1, audioCtx.currentTime);
+    }
+  }
+
+  // ============================================================
+  // PARTICLE HELPERS
+  // ============================================================
+  function spawnBurst(x, y, color) {
+    const count = 6 + Math.floor(Math.random() * 3);
+    for (let i = 0; i < count; i++) {
+      const angle = (Math.PI * 2 / count) * i + Math.random() * 0.5;
+      const speed = 1.5 + Math.random() * 2.5;
+      particles.push({
+        x, y,
+        vx: Math.cos(angle) * speed,
+        vy: Math.sin(angle) * speed,
+        life: 20, color,
+      });
+    }
+  }
+
+  function spawnConfetti(cx, cy, count) {
+    const colors = ['#ffd700','#ff69b4','#ffffff','#e94560','#d4760a','#ff6b9d','#ffec80'];
+    for (let i = 0; i < count; i++) {
+      const angle = -Math.PI/2 + (Math.random() - 0.5) * Math.PI * 1.2;
+      const speed = 3 + Math.random() * 5;
+      confetti.push({
+        x: cx + (Math.random() - 0.5) * 40,
+        y: cy,
+        vx: Math.cos(angle) * speed + (Math.random() - 0.5) * 2,
+        vy: Math.sin(angle) * speed - 2,
+        size: 2 + Math.floor(Math.random() * 4),
+        color: colors[Math.floor(Math.random() * colors.length)],
+        life: 180 + Math.floor(Math.random() * 60),
+        spin: Math.random() * 0.3,
+      });
+    }
+  }
+
+  function drawBigHeart(cx, cy, scale) {
+    if (scale <= 0) return;
+    const s = P * scale;
+    const c = '#ff3366', h = '#ff6690';
+    ctx.fillStyle = c;
+    // Scaled pixel heart: 7 wide, 6 tall in grid units
+    ctx.fillRect(cx - 3*s, cy - 2*s, s, s); ctx.fillRect(cx - 2*s, cy - 3*s, s, s); ctx.fillRect(cx - s, cy - 3*s, s, s);
+    ctx.fillRect(cx + s, cy - 3*s, s, s); ctx.fillRect(cx + 2*s, cy - 3*s, s, s); ctx.fillRect(cx + 3*s, cy - 2*s, s, s);
+    for (let i = -3; i <= 3; i++) ctx.fillRect(cx + i*s, cy - 2*s, s, s);
+    for (let i = -3; i <= 3; i++) ctx.fillRect(cx + i*s, cy - s, s, s);
+    for (let i = -2; i <= 2; i++) ctx.fillRect(cx + i*s, cy, s, s);
+    for (let i = -1; i <= 1; i++) ctx.fillRect(cx + i*s, cy + s, s, s);
+    ctx.fillRect(cx, cy + 2*s, s, s);
+    // Highlight
+    ctx.fillStyle = h;
+    ctx.fillRect(cx - 2*s, cy - 3*s, s, s); ctx.fillRect(cx - 3*s, cy - 2*s, s, s);
+  }
+
+  function spawnTitleConfetti() {
+    const colors = ['#ffd700','#ff69b4','#ffffff','#e94560','#d4760a','#ffec80'];
+    for (let i = 0; i < 15; i++) {
+      titleConfetti.push({
+        x: Math.random() * CANVAS_W,
+        y: Math.random() * CANVAS_H,
+        vy: 0.3 + Math.random() * 0.5,
+        vx: (Math.random() - 0.5) * 0.4,
+        size: 2 + Math.floor(Math.random() * 3),
+        color: colors[Math.floor(Math.random() * colors.length)],
+        spin: Math.random() * 0.2,
+      });
+    }
+  }
+  spawnTitleConfetti();
+
+  // ============================================================
+  // UPDATE
+  // ============================================================
+  function updateWinSequence() {
+    winTimer++;
+
+    // Update confetti physics (all phases after spawning)
+    for (let i = confetti.length - 1; i >= 0; i--) {
+      const c = confetti[i];
+      c.x += c.vx;
+      c.y += c.vy;
+      c.vy += 0.08;
+      c.vx *= 0.99;
+      c.life--;
+      if (c.life <= 0 || c.y > CANVAS_H + 20) confetti.splice(i, 1);
+    }
+
+    // Screen flash decay
+    if (screenFlash > 0) screenFlash -= 0.15;
+
+    // Let Amanda finish her jump arc (gravity) during early win phases
+    if (!player.grounded) {
+      player.vy += GRAVITY;
+      player.y += player.vy;
+      if (player.y >= GROUND_Y) {
+        player.y = GROUND_Y;
+        player.vy = 0;
+        player.grounded = true;
+      }
+    }
+
+    if (winPhase === 0) {
+      // Slow scroll to zero over ~60 frames
+      winScrollSpeed *= 0.96;
+      scrollX += winScrollSpeed;
+      if (winTimer >= 60 || winScrollSpeed < 0.05) {
+        winScrollSpeed = 0;
+        winPhase = 1;
+        winTimer = 0;
+      }
+    } else if (winPhase === 1) {
+      // Altar and Anthony slide in from right
+      const slideSpeed = 4;
+      altarX -= slideSpeed;
+      anthonyX -= slideSpeed;
+      if (altarX <= ALTAR_TARGET) {
+        altarX = ALTAR_TARGET;
+        anthonyX = ALTAR_TARGET;
+        winPhase = 2;
+        winTimer = 0;
+        playBridalChorus(); // "Here Comes The Bride" plays as Amanda walks to Anthony
+      }
+    } else if (winPhase === 2) {
+      // Amanda runs rightward to meet Anthony
+      player.x += 2.5;
+      player.animTimer++;
+      if (player.animTimer >= 8) {
+        player.animTimer = 0;
+        player.animFrame = 1 - player.animFrame;
+      }
+      if (player.x >= AMANDA_MEET_X) {
+        player.x = AMANDA_MEET_X;
+        player.animFrame = 0;
+        winPhase = 3;
+        winTimer = 0;
+        // Kiss moment: flash + confetti burst
+        sfxWin();
+        screenFlash = 1;
+        const meetX = (player.x + anthonyX) / 2;
+        spawnConfetti(meetX, GROUND_Y - 20, 55);
+        kissHeartScale = 0;
+      }
+    } else if (winPhase === 3) {
+      // Kiss moment — slide together, heart grows, confetti falls
+      const kissGap = 12; // pixels apart when kissing
+      const kissCenter = (AMANDA_MEET_X + ALTAR_TARGET) / 2;
+      player.x = Math.min(player.x + 2, kissCenter - kissGap / 2);
+      anthonyX = Math.max(anthonyX - 2, kissCenter + kissGap / 2);
+      kissHeartScale = Math.min(kissHeartScale + 0.04, 1.2);
+      if (winTimer >= 60) {
+        winPhase = 4;
+        winTimer = 0;
+      }
+    } else if (winPhase === 4) {
+      // Hold for 1 second — confetti continues drifting
+      if (winTimer >= 60) {
+        winPhase = 5;
+        winTimer = 0;
+        // High score celebration at overlay start
+        if (isNewHighScore) {
+          sfxHighScore();
+          const meetX = (player.x + anthonyX) / 2;
+          spawnConfetti(meetX, GROUND_Y - 40, 80);
+        }
+      }
+    }
+    // Phase 5: overlay fades in — winTimer used for fade alpha
+  }
+
+  function update(dt) {
+    frameTick++;
+
+    // Title confetti drift
+    if (gameState === State.TITLE) {
+      for (const c of titleConfetti) {
+        c.y += c.vy;
+        c.x += c.vx;
+        if (c.y > CANVAS_H + 10) { c.y = -5; c.x = Math.random() * CANVAS_W; }
+        if (c.x < -5) c.x = CANVAS_W + 5;
+        if (c.x > CANVAS_W + 5) c.x = -5;
+      }
+      return; // frameTick already incremented above
+    }
+
+    // Ready countdown — "GET READY!" then "GO!" then start playing
+    if (gameState === State.READY) {
+      readyTimer++;
+      // 150 frames (~2.5s): 0-119 = "GET READY!", 120-149 = "GO!", then start
+      if (readyTimer >= 150) {
+        gameState = State.PLAYING;
+        startMusic(scheduleGameMusicLoop);
+      }
+      return;
+    }
+
+    if (gameState === State.WIN) { updateWinSequence(); return; }
+
+    if (gameState === State.GAMEOVER) {
+      gameOverTimer++;
+      if (gameOverPhase === 0) {
+        // Stumble — 15 frames
+        if (gameOverTimer >= 15) {
+          gameOverPhase = 1;
+          gameOverTimer = 0;
+        }
+      } else if (gameOverPhase === 1) {
+        // Pause — 30 frames (0.5s)
+        if (gameOverTimer >= 30) {
+          gameOverPhase = 2;
+          gameOverTimer = 0;
+          if (isNewHighScore) sfxHighScore();
+        }
+      }
+      // Phase 2: overlay fades in, gameOverTimer used for fade
+      return;
+    }
+
+    if (gameState !== State.PLAYING) return;
+
+    playFrames++;
+
+    // Speed
+    gameSpeed = Math.min(BASE_SPEED + distanceTraveled * SPEED_INCREASE, MAX_SPEED);
+    effectiveSpeed = boostTimer > 0 ? gameSpeed * 2 : gameSpeed;
+    distanceTraveled += effectiveSpeed;
+    scrollX += effectiveSpeed;
+
+    // Win condition — start sequence
+    if (distanceTraveled >= WIN_DISTANCE) {
+      // Speed bonus: based on champagne boosts collected
+      timeBonus = Math.min(1.0 + champagneCount * 0.5, 4.0);
+      finalScore = Math.round(score * timeBonus);
+      submitScore(finalScore);
+      stopMusic();
+      gameState = State.WIN;
+      winPhase = 0;
+      winTimer = 0;
+      winScrollSpeed = effectiveSpeed;
+      anthonyX = CANVAS_W + 60;
+      altarX = CANVAS_W + 30;
+      return;
+    }
+
+    // Boost countdown
+    if (boostTimer > 0) boostTimer--;
+    if (invincibleTimer > 0) invincibleTimer--;
+    if (multiplierTimer > 0) multiplierTimer--;
+    if (magnetTimer > 0) magnetTimer--;
+
+    // Jump (double jump supported)
+    if (jumpRequested && player.jumpsLeft > 0) {
+      player.vy = player.grounded ? JUMP_VEL : JUMP_VEL * 0.8;
+      player.grounded = false;
+      player.jumpsLeft--;
+      sfxJump();
+      // Double jump puff effect
+      if (player.jumpsLeft === 0) {
+        for (let i = 0; i < 4; i++) {
+          particles.push({
+            x: player.x + (Math.random() - 0.5) * 8,
+            y: player.y,
+            vx: (Math.random() - 0.5) * 2,
+            vy: Math.random() * 1.5,
+            life: 10 + Math.floor(Math.random() * 5),
+            color: '#ffb6c1',
+          });
+        }
+      }
+    }
+    jumpRequested = false;
+
+    // Gravity
+    if (!player.grounded) {
+      player.vy += GRAVITY;
+      player.y += player.vy;
+      if (player.y >= GROUND_Y) {
+        player.y = GROUND_Y;
+        player.vy = 0;
+        player.grounded = true;
+        player.jumpsLeft = 2;
+        // Landing dust
+        for (let i = 0; i < 5; i++) {
+          particles.push({
+            x: player.x + (Math.random() - 0.5) * 12,
+            y: GROUND_Y,
+            vx: (Math.random() - 0.5) * 2.5,
+            vy: -Math.random() * 1.5 - 0.5,
+            life: 12 + Math.floor(Math.random() * 6),
+            color: Math.random() > 0.5 ? '#8b7355' : '#6b5335',
+          });
+        }
+      }
+    }
+
+    // Run anim
+    if (player.grounded) {
+      player.animTimer++;
+      if (player.animTimer >= 8) {
+        player.animTimer = 0;
+        player.animFrame = 1 - player.animFrame;
+      }
+    }
+
+    // --- Obstacle spawning (with pattern system) ---
+    // Process pattern queue first
+    if (patternQueue.length > 0) {
+      patternQueue[0].delay--;
+      if (patternQueue[0].delay <= 0) {
+        const entry = patternQueue.shift();
+        const obs = { type: entry.type, x: CANVAS_W + 10 };
+        if (OBSTACLE_TYPES[entry.type].floating) obs.floatY = entry.floatY || (GROUND_Y - 110);
+        obstacles.push(obs);
+      }
+    }
+    // Regular spawn timer
+    spawnTimer--;
+    if (spawnTimer <= 0 && patternQueue.length === 0) {
+      const rate = BASE_SPEED / gameSpeed;
+      // 40% chance of a pattern after distance 800 (let player warm up)
+      if (distanceTraveled > 800 && Math.random() < 0.4) {
+        const pat = Math.random();
+        if (pat < 0.35) {
+          // Double: two ground obstacles in quick succession
+          const t1 = Math.floor(Math.random() * GROUND_OBSTACLE_COUNT);
+          const t2 = Math.floor(Math.random() * GROUND_OBSTACLE_COUNT);
+          obstacles.push({ type: t1, x: CANVAS_W + 10 });
+          patternQueue.push({ type: t2, delay: Math.floor(18 * rate) });
+        } else if (pat < 0.65) {
+          // Gap: ground obstacle then floating rain cloud (thread the needle)
+          const t1 = Math.floor(Math.random() * GROUND_OBSTACLE_COUNT);
+          obstacles.push({ type: t1, x: CANVAS_W + 10 });
+          patternQueue.push({ type: 5, delay: Math.floor(28 * rate), floatY: GROUND_Y - 105 });
+        } else {
+          // Triple rush: three obstacles in quick succession
+          const types = [0,1,2,3];
+          obstacles.push({ type: types[Math.floor(Math.random()*types.length)], x: CANVAS_W + 10 });
+          patternQueue.push({ type: types[Math.floor(Math.random()*types.length)], delay: Math.floor(16 * rate) });
+          patternQueue.push({ type: types[Math.floor(Math.random()*types.length)], delay: Math.floor(16 * rate) });
+        }
+      } else {
+        // Single obstacle — pick type based on distance progression
+        let type;
+        if (distanceTraveled < 1500) {
+          // Early: basic ground types 0-3
+          type = Math.floor(Math.random() * 4);
+        } else if (distanceTraveled < 3000) {
+          // Mid: add Flower Girl (type 4)
+          type = Math.floor(Math.random() * 5);
+        } else {
+          // Late: all types including Rain Cloud (type 5)
+          type = Math.floor(Math.random() * OBSTACLE_TYPES.length);
+        }
+        const obs = { type, x: CANVAS_W + 10 };
+        if (OBSTACLE_TYPES[type].floating) obs.floatY = GROUND_Y - 100 - Math.random() * 30;
+        obstacles.push(obs);
+      }
+      spawnTimer = Math.floor(150 * rate + Math.random() * 100 * rate);
+    }
+
+    // --- Move obstacles ---
+    for (let i = obstacles.length - 1; i >= 0; i--) {
+      obstacles[i].x -= effectiveSpeed;
+      if (obstacles[i].x + OBSTACLE_TYPES[obstacles[i].type].w < -20) obstacles.splice(i, 1);
+    }
+
+    // --- Flower Girl flaming flower projectiles ---
+    for (const obs of obstacles) {
+      if (obs.type !== 4) continue;
+      if (!obs.fireTimer) obs.fireTimer = 30 + Math.floor(Math.random() * 30);
+      obs.fireTimer--;
+      if (obs.fireTimer <= 0) {
+        obs.fireTimer = 50 + Math.floor(Math.random() * 30);
+        const cx = obs.x + OBSTACLE_TYPES[4].w / 2;
+        const fy = GROUND_Y - OBSTACLE_TYPES[4].h + 22;
+        flamingFlowers.push({ x: cx - 10, y: fy, vx: -3.5 - Math.random() * 2, vy: -3 - Math.random() * 2 });
+      }
+    }
+    // Move flaming flowers (arc with gravity)
+    for (let i = flamingFlowers.length - 1; i >= 0; i--) {
+      const ff = flamingFlowers[i];
+      ff.x += ff.vx;
+      ff.y += ff.vy;
+      ff.vy += 0.12; // gravity
+      if (ff.x < -20 || ff.y > GROUND_Y + 10) flamingFlowers.splice(i, 1);
+    }
+
+    // --- Collectible spawning ---
+    collectSpawnTimer--;
+    if (collectSpawnTimer <= 0) {
+      const ctype = pickCollectType();
+      collectibles.push({
+        type: ctype,
+        x: CANVAS_W + 20,
+        baseY: 200 + Math.random() * 120,
+        tick: frameTick,
+      });
+      if (ctype >= 2) {
+        lastEffectSpawn = frameTick;
+        spawnedEffects.add(ctype);
+      }
+      collectSpawnTimer = 80 + Math.floor(Math.random() * 51);
+    }
+
+    // --- Move collectibles ---
+    for (let i = collectibles.length - 1; i >= 0; i--) {
+      collectibles[i].x -= effectiveSpeed;
+      if (collectibles[i].x < -30) collectibles.splice(i, 1);
+    }
+
+    // --- Magnet pull (when active, nearby collectibles fly straight to player) ---
+    if (magnetTimer > 0) {
+      const mx = player.x, my = player.y - 16;
+      for (const c of collectibles) {
+        const dx = mx - c.x, dy = my - c.baseY;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist < 180) {
+          // Counteract scroll so items don't drift behind, then pull hard
+          c.x += effectiveSpeed; // undo the scroll movement applied above
+          const strength = 0.25;
+          c.x += dx * strength;
+          c.baseY += dy * strength;
+        }
+      }
+    }
+
+    // --- Collectible collision (circle r=20) ---
+    const pcx = player.x;
+    const pcy = player.y - 16;
+    for (let i = collectibles.length - 1; i >= 0; i--) {
+      const c = collectibles[i];
+      const bob = Math.sin((frameTick - c.tick) * 0.08) * 3;
+      const ccx = c.x;
+      const ccy = c.baseY + bob;
+      const dx = pcx - ccx, dy = pcy - ccy;
+      if (dx * dx + dy * dy < 20 * 20) {
+        // Collect!
+        sfxCollect();
+        spawnBurst(ccx, ccy, COLLECT_COLORS[c.type]);
+
+        const mult = multiplierTimer > 0 ? 2 : 1;
+        switch (c.type) {
+          case 0: // Heart — restore 1 HP
+            if (hp < 3) hp++;
+            floatingTexts.push({ x: ccx, y: ccy, text: '+1 \u2764\uFE0F', life: 45 });
+            break;
+          case 1: // Ring — 25 pts
+            score += 25 * mult;
+            floatingTexts.push({ x: ccx, y: ccy, text: '+' + (25 * mult), life: 40 });
+            break;
+          case 2: // Champagne — speed boost
+            boostTimer = 120;
+            champagneCount++;
+            score += 10 * mult;
+            floatingTexts.push({ x: ccx, y: ccy, text: '+' + (10 * mult), life: 40 });
+            break;
+          case 3: // Bouquet — invincibility
+            invincibleTimer = 300;
+            score += 10 * mult;
+            sfxInvincible();
+            floatingTexts.push({ x: ccx, y: ccy, text: 'INVINCIBLE! +' + (10 * mult), life: 50 });
+            break;
+          case 4: // Tiara — 2x score multiplier
+            multiplierTimer = 480;
+            score += 10 * mult;
+            floatingTexts.push({ x: ccx, y: ccy, text: '2X SCORE! +' + (10 * mult), life: 60 });
+            break;
+          case 5: // Magnet
+            magnetTimer = 300;
+            score += 10 * mult;
+            floatingTexts.push({ x: ccx, y: ccy, text: 'MAGNET! +' + (10 * mult), life: 50 });
+            break;
+        }
+
+        collectibles.splice(i, 1);
+      }
+    }
+
+    // --- Flash / shake / hint timer ---
+    if (flashTimer > 0) flashTimer--;
+    if (shakeTimer > 0) shakeTimer--;
+    if (jumpHintTimer > 0) jumpHintTimer--;
+
+    // --- Obstacle collision ---
+    // Helper: get obstacle x with pacing offset for drunk uncle
+    function obsEffectiveX(obs) {
+      return obs.x + (obs.type === 1 ? Math.sin(frameTick * 0.05) * 20 : 0);
+    }
+    if (invincibleTimer > 0) {
+      // Invincible: smash through obstacles!
+      const pL = player.x - 6, pR = player.x + 6;
+      const pT = player.y - 28, pB = player.y - 1;
+      for (let i = obstacles.length - 1; i >= 0; i--) {
+        const obs = obstacles[i];
+        const type = OBSTACLE_TYPES[obs.type];
+        const ex = obsEffectiveX(obs);
+        const oL = ex + 3, oR = ex + type.w - 3;
+        let oT, oB;
+        if (type.floating) {
+          oT = obs.floatY + 3;
+          oB = obs.floatY + type.h - 3;
+        } else {
+          oT = GROUND_Y - type.h + 3;
+          oB = GROUND_Y;
+        }
+        if (pL < oR && pR > oL && pT < oB && pB > oT) {
+          // Destroy obstacle
+          sfxSmash();
+          score += 5;
+          const ox = ex + type.w / 2;
+          const oy = type.floating ? obs.floatY + type.h / 2 : GROUND_Y - type.h / 2;
+          spawnBurst(ox, oy, '#ffd700');
+          floatingTexts.push({ x: ox, y: oy - 10, text: 'SMASH! +5', life: 35 });
+          obstacles.splice(i, 1);
+        }
+      }
+      // Smash flaming flowers too
+      for (let i = flamingFlowers.length - 1; i >= 0; i--) {
+        const ff = flamingFlowers[i];
+        const dx = player.x - ff.x, dy = (player.y - 14) - ff.y;
+        if (dx*dx + dy*dy < 18*18) {
+          spawnBurst(ff.x, ff.y, '#ff6600');
+          flamingFlowers.splice(i, 1);
+        }
+      }
+    } else if (flashTimer <= 0) {
+      const pL = player.x - 6, pR = player.x + 6;
+      const pT = player.y - 28, pB = player.y - 1;
+      let wasHit = false;
+      for (const obs of obstacles) {
+        const type = OBSTACLE_TYPES[obs.type];
+        const ex = obsEffectiveX(obs);
+        const oL = ex + 3, oR = ex + type.w - 3;
+        let oT, oB;
+        if (type.floating) {
+          oT = obs.floatY + 3;
+          oB = obs.floatY + type.h - 3;
+        } else {
+          oT = GROUND_Y - type.h + 3;
+          oB = GROUND_Y;
+        }
+        if (pL < oR && pR > oL && pT < oB && pB > oT) {
+          obs.hitPlayer = true;
+          hp--;
+          flashTimer = 30;
+          shakeTimer = 10;
+          sfxDamage();
+          wasHit = true;
+          if (hp <= 0) {
+            hp = 0;
+            stopMusic();
+            sfxLose();
+            gameState = State.GAMEOVER;
+            gameOverPhase = 0;
+            gameOverTimer = 0;
+          }
+          break;
+        }
+      }
+      // Flaming flower collision (only if not already hit this frame)
+      if (!wasHit && flashTimer <= 0) {
+        for (let i = flamingFlowers.length - 1; i >= 0; i--) {
+          const ff = flamingFlowers[i];
+          const dx = player.x - ff.x, dy = (player.y - 14) - ff.y;
+          if (dx*dx + dy*dy < 14*14) {
+            hp--;
+            flashTimer = 30;
+            shakeTimer = 10;
+            sfxDamage();
+            spawnBurst(ff.x, ff.y, '#ff6600');
+            flamingFlowers.splice(i, 1);
+            if (hp <= 0) {
+              hp = 0;
+              stopMusic();
+              sfxLose();
+              gameState = State.GAMEOVER;
+              gameOverPhase = 0;
+              gameOverTimer = 0;
+            }
+            break;
+          }
+        }
+      }
+    }
+
+    // --- Near-miss bonus (skip during invincibility) ---
+    if (flashTimer <= 0 && invincibleTimer <= 0) {
+      const pL = player.x - 6, pR = player.x + 6;
+      const pT = player.y - 28;
+      for (const obs of obstacles) {
+        if (obs.nearMissScored || obs.hitPlayer) continue;
+        const type = OBSTACLE_TYPES[obs.type];
+        const ex = obsEffectiveX(obs);
+        const oR = ex + type.w - 3;
+        // Player just passed the right edge of the obstacle
+        if (oR < pR && oR > pR - effectiveSpeed * 2.5) {
+          let oT;
+          if (type.floating) {
+            oT = obs.floatY + 3;
+          } else {
+            oT = GROUND_Y - type.h + 3;
+          }
+          // Was vertically close to the top edge (within 16px)
+          if (pT < oT + 14 && pT > oT - 22) {
+            obs.nearMissScored = true;
+            score += 20;
+            floatingTexts.push({ x: player.x, y: player.y - 40, text: 'CLOSE! +20', life: 40 });
+            // Sparkle burst
+            for (let i = 0; i < 3; i++) {
+              sparkles.push({
+                x: player.x + (Math.random()-0.5)*10,
+                y: player.y - 20 + (Math.random()-0.5)*10,
+                vx: (Math.random()-0.5)*2,
+                vy: -Math.random()*2,
+                life: 15,
+                color: '#ffd700',
+              });
+            }
+          }
+        }
+      }
+    }
+
+    // --- Update particles ---
+    for (let i = particles.length - 1; i >= 0; i--) {
+      const p = particles[i];
+      p.x += p.vx;
+      p.y += p.vy;
+      p.vy += 0.1;
+      p.life--;
+      if (p.life <= 0) particles.splice(i, 1);
+    }
+
+    // --- Update floating texts ---
+    for (let i = floatingTexts.length - 1; i >= 0; i--) {
+      floatingTexts[i].life--;
+      if (floatingTexts[i].life <= 0) floatingTexts.splice(i, 1);
+    }
+
+    // --- Boost sparkles ---
+    if (boostTimer > 0 && frameTick % 2 === 0) {
+      sparkles.push({
+        x: player.x - 8 + Math.random() * 16,
+        y: player.y - 8 - Math.random() * 24,
+        life: 15,
+        size: 1 + Math.random() * 3,
+        color: Math.random() > 0.5 ? '#ffd700' : '#ffee88',
+      });
+    }
+    // --- Invincible rainbow sparkles (denser) ---
+    if (invincibleTimer > 0) {
+      sparkles.push({
+        x: player.x - 10 + Math.random() * 20,
+        y: player.y - Math.random() * 30,
+        life: 18,
+        size: 2 + Math.random() * 3,
+        color: RAINBOW_COLORS[Math.floor(Math.random() * RAINBOW_COLORS.length)],
+      });
+    }
+    // --- Multiplier gold sparkles ---
+    if (multiplierTimer > 0 && frameTick % 3 === 0) {
+      sparkles.push({
+        x: player.x - 8 + Math.random() * 16,
+        y: player.y - 6 - Math.random() * 26,
+        life: 14,
+        size: 1.5 + Math.random() * 2.5,
+        color: Math.random() > 0.5 ? '#ffd700' : '#e0b0ff',
+      });
+    }
+    // --- Magnet cyan sparkles ---
+    if (magnetTimer > 0 && frameTick % 2 === 0) {
+      sparkles.push({
+        x: player.x - 10 + Math.random() * 20,
+        y: player.y - 4 - Math.random() * 28,
+        life: 12,
+        size: 1 + Math.random() * 2.5,
+        color: Math.random() > 0.5 ? '#00e5ff' : '#80f0ff',
+      });
+    }
+
+    // --- Update sparkles ---
+    for (let i = sparkles.length - 1; i >= 0; i--) {
+      const s = sparkles[i];
+      s.x -= effectiveSpeed * 0.4;
+      s.y -= 0.3 + Math.random() * 0.3;
+      s.life--;
+      if (s.life <= 0) sparkles.splice(i, 1);
+    }
+  }
+
+  // ============================================================
+  // DRAW BRIDE
+  // ============================================================
+  function drawBride(cx, feetY, frame, airborne, tint) {
+    const bob = (!airborne && frame === 1) ? -2 : 0;
+    const by = feetY + bob;
+    function px(col, row, color) {
+      ctx.fillStyle = tint || color;
+      ctx.fillRect(cx + col*P, by + row*P, P, P);
+    }
+    const SK='#f4c794',HR='#4a3728',WH='#ffffff',SH='#e8e0e0',GD='#ffd700',PK='#ff69b4',LP='#ffb6c1';
+
+    const veilBob = airborne ? 4 : (frame === 1 ? 3 : 0);
+    ctx.fillStyle = tint ? 'rgba(255,80,80,0.3)' : 'rgba(255,255,255,0.3)';
+    ctx.fillRect(cx-2*P,by-9*P+veilBob,P,P*2); ctx.fillRect(cx-3*P,by-8*P+veilBob,P,P*3); ctx.fillRect(cx-4*P,by-7*P+veilBob,P,P*2);
+    ctx.fillStyle = tint ? 'rgba(255,80,80,0.2)' : 'rgba(255,255,255,0.2)';
+    ctx.fillRect(cx-4*P,by-6*P+veilBob,P,P*2); ctx.fillRect(cx-5*P,by-6*P+veilBob,P,P*2); ctx.fillRect(cx-5*P,by-5*P+veilBob,P,P);
+
+    px(0,-11,GD); px(-1,-10,GD); px(0,-10,GD); px(1,-10,GD);
+    for (let c=-2;c<=2;c++) px(c,-9,HR);
+    px(-2,-8,HR); px(2,-8,HR); px(-2,-7,HR);
+    px(-1,-8,SK); px(0,-8,SK); px(1,-8,SK);
+    px(-1,-7,SK); px(0,-7,SK); px(1,-7,SK);
+    px(0,-6,SK);
+
+    if (!airborne) {
+      px(-1,-6,WH); px(1,-6,WH); px(-1,-5,WH); px(0,-5,WH); px(1,-5,WH);
+      px(-2,-5,SK); px(2,-5,SK);
+      for (let c=-2;c<=2;c++) px(c,-4,WH);
+      for (let c=-3;c<=3;c++) px(c,-3,(c===-3||c===3)?SH:WH);
+      for (let c=-3;c<=3;c++) px(c,-2,(c===-3||c===3)?SH:WH);
+      px(-2,-2,SH); px(1,-2,SH);
+      if (frame===0) { px(-1,-1,WH); px(0,-1,WH); } else { px(-2,-1,WH); px(1,-1,WH); }
+      px(2,-6,PK); px(3,-6,GD); px(2,-5,LP); px(3,-5,PK); px(3,-4,LP);
+    } else {
+      px(-1,-6,WH); px(1,-6,WH); px(-1,-5,WH); px(0,-5,WH); px(1,-5,WH);
+      px(-2,-7,SK); px(-3,-8,SK); px(2,-7,SK); px(3,-8,SK);
+      px(4,-8,PK); px(4,-9,GD); px(3,-9,PK);
+      for (let c=-2;c<=2;c++) px(c,-4,WH);
+      for (let c=-2;c<=2;c++) px(c,-3,WH);
+      for (let c=-2;c<=2;c++) px(c,-2,WH);
+      px(-1,-1,WH); px(0,-1,WH);
+    }
+  }
+
+  // ============================================================
+  // DRAW GROOM (Anthony)
+  // ============================================================
+  function drawGroom(cx, feetY) {
+    function px(col, row, color) {
+      ctx.fillStyle = color;
+      ctx.fillRect(cx + col*P, feetY + row*P, P, P);
+    }
+    const SK='#f4c794',HR='#4a3728',NV='#2c2c54',WH='#ffffff',RD='#e94560',SH='#1e1e3f';
+
+    // Hair
+    for (let c=-2;c<=2;c++) px(c,-9,HR);
+    px(-2,-8,HR); px(2,-8,HR);
+    // Face
+    px(-1,-8,SK); px(0,-8,SK); px(1,-8,SK);
+    px(-1,-7,SK); px(0,-7,SK); px(1,-7,SK);
+    // Neck
+    px(0,-6,SK);
+    // Collar (white shirt)
+    px(-1,-6,WH); px(1,-6,WH);
+    // Tie
+    px(0,-5,RD); px(0,-4,RD);
+    // Suit jacket
+    px(-1,-5,NV); px(1,-5,NV);
+    px(-2,-5,NV); px(2,-5,NV);
+    for (let c=-2;c<=2;c++) if (c!==0) px(c,-4,NV);
+    for (let c=-2;c<=2;c++) if (c!==0) px(c,-3,NV);
+    // Suit bottom
+    px(-2,-3,SH); px(2,-3,SH);
+    // Boutonniere (left lapel)
+    px(-2,-5,'#ff69b4');
+    // Hands
+    px(-3,-4,SK); px(3,-4,SK);
+    // Pants
+    for (let c=-2;c<=2;c++) px(c,-2,SH);
+    // Legs
+    px(-1,-1,SH); px(0,-1,SH); px(1,-1,SH);
+    // Shoes
+    px(-1,0,'#1a1a1a'); px(1,0,'#1a1a1a');
+  }
+
+  // ============================================================
+  // DRAW ALTAR
+  // ============================================================
+  function drawAltar(centerX) {
+    const colW = 3;           // columns 3 pixels wide (in P units = 9px)
+    const colH = 18;          // 18 P-units tall = 54px
+    const gap = 14;           // gap between column centers in P-units
+    const baseY = GROUND_Y;
+
+    // Left column
+    const lx = centerX - gap * P / 2;
+    ctx.fillStyle = '#d4c4a0';
+    ctx.fillRect(lx, baseY - colH * P, colW * P, colH * P);
+    ctx.fillStyle = '#bfb08a';
+    ctx.fillRect(lx, baseY - colH * P, P, colH * P); // shadow edge
+
+    // Right column
+    const rx = centerX + gap * P / 2 - colW * P;
+    ctx.fillStyle = '#d4c4a0';
+    ctx.fillRect(rx, baseY - colH * P, colW * P, colH * P);
+    ctx.fillStyle = '#c8b894';
+    ctx.fillRect(rx + (colW-1)*P, baseY - colH * P, P, colH * P); // highlight edge
+
+    // Arch connecting tops — simple arc of autumn leaves
+    const archTop = baseY - colH * P - 8;
+    const archL = lx + colW * P / 2;
+    const archR = rx + colW * P / 2;
+    const archMidX = (archL + archR) / 2;
+    const leafColors = ['#d4760a','#c0392b','#e74c3c','#d35400','#b8860b','#ff69b4'];
+    const rng = mulberry32(77777);
+    const steps = 16;
+    for (let i = 0; i <= steps; i++) {
+      const t = i / steps;
+      const ax = archL + (archR - archL) * t;
+      const ay = archTop - Math.sin(t * Math.PI) * 18;
+      ctx.fillStyle = leafColors[Math.floor(rng() * leafColors.length)];
+      ctx.fillRect(Math.floor(ax) - 3, Math.floor(ay) - 3, 7, 7);
+      if (rng() > 0.3) {
+        ctx.fillStyle = leafColors[Math.floor(rng() * leafColors.length)];
+        ctx.fillRect(Math.floor(ax) - 1, Math.floor(ay) - 6, 4, 4);
+      }
+    }
+  }
+
+  // ============================================================
+  // DRAW OBSTACLE
+  // ============================================================
+  function drawObstacle(obs) {
+    const type = OBSTACLE_TYPES[obs.type];
+    const w = type.w, h = type.h;
+    // Drunk Uncle paces back and forth
+    const paceOffset = obs.type === 1 ? Math.sin(frameTick * 0.05) * 20 : 0;
+    const x = obs.x + paceOffset;
+    const y = type.floating ? obs.floatY : GROUND_Y - h;
+    // Shadow (only for ground obstacles)
+    if (!type.floating) {
+      ctx.fillStyle = 'rgba(0,0,0,0.25)';
+      ctx.beginPath(); ctx.ellipse(x+w/2,GROUND_Y+2,w/2+3,4,0,0,Math.PI*2); ctx.fill();
+    }
+
+    switch (obs.type) {
+      case 0: { // Angry Mother-in-Law — elegant older lady in gown, shaking fist
+        const cx = x + w/2;
+        // Elegant gown (A-line, plum/purple)
+        ctx.fillStyle = '#6B3A6B';
+        ctx.beginPath(); ctx.moveTo(cx-4, y+20); ctx.lineTo(cx-16, y+h); ctx.lineTo(cx+16, y+h); ctx.lineTo(cx+4, y+20); ctx.closePath(); ctx.fill();
+        ctx.fillStyle = '#7D4A7D';
+        ctx.beginPath(); ctx.moveTo(cx-2, y+22); ctx.lineTo(cx-13, y+h); ctx.lineTo(cx+13, y+h); ctx.lineTo(cx+2, y+22); ctx.closePath(); ctx.fill();
+        // Gown neckline detail
+        ctx.fillStyle = '#8B5A8B';
+        ctx.fillRect(cx-6, y+18, 12, 4);
+        // Pearl necklace
+        ctx.fillStyle = '#f0e8d8';
+        for (let i = -2; i <= 2; i++) ctx.fillRect(cx + i*3, y+19, 2, 2);
+        // Head
+        ctx.fillStyle = '#f5d0a9'; ctx.beginPath(); ctx.arc(cx, y+14, 8, 0, Math.PI*2); ctx.fill();
+        // Styled silver hair (volume, swept back)
+        ctx.fillStyle = '#c0c0c0';
+        ctx.beginPath(); ctx.arc(cx, y+11, 9, Math.PI+0.2, -0.2); ctx.fill();
+        ctx.fillStyle = '#a8a8a8';
+        ctx.beginPath(); ctx.arc(cx+1, y+9, 7, Math.PI+0.4, -0.1); ctx.fill();
+        // Hair volume on sides
+        ctx.fillStyle = '#b8b8b8';
+        ctx.fillRect(cx-9, y+9, 3, 6); ctx.fillRect(cx+6, y+9, 3, 6);
+        // Furrowed eyebrows (annoyed, not menacing)
+        ctx.strokeStyle = '#777'; ctx.lineWidth = 1.5;
+        ctx.beginPath(); ctx.moveTo(cx-6, y+12); ctx.lineTo(cx-2, y+13); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(cx+6, y+12); ctx.lineTo(cx+2, y+13); ctx.stroke();
+        // Eyes
+        ctx.fillStyle = '#444';
+        ctx.fillRect(cx-4, y+13, 2, 2); ctx.fillRect(cx+2, y+13, 2, 2);
+        // Pursed lips
+        ctx.fillStyle = '#cc6677';
+        ctx.fillRect(cx-3, y+18, 6, 2);
+        // Shaking fist (animated)
+        const fistY = y + 22 + Math.sin(frameTick * 0.3) * 4;
+        const fistX = cx - 16;
+        // Arm with sleeve
+        ctx.strokeStyle = '#6B3A6B'; ctx.lineWidth = 4;
+        ctx.beginPath(); ctx.moveTo(cx-10, y+26); ctx.lineTo(fistX, fistY); ctx.stroke();
+        // Hand/fist
+        ctx.fillStyle = '#f5d0a9';
+        ctx.beginPath(); ctx.arc(fistX, fistY, 4, 0, Math.PI*2); ctx.fill();
+        break;
+      }
+      case 1: { // Drunk Uncle — stumbling man with wine glass (paces back/forth)
+        const cx = x + w/2;
+        const facingRight = Math.cos(frameTick * 0.05) > 0;
+        const dir = facingRight ? 1 : -1;
+        // Body — dark suit, slightly tilted
+        ctx.save();
+        ctx.translate(cx, y+h);
+        ctx.rotate(0.08 * dir);
+        ctx.translate(-cx, -(y+h));
+        // Suit body
+        ctx.fillStyle = '#2c2c2c';
+        ctx.fillRect(cx-10, y+18, 20, 30);
+        ctx.fillStyle = '#3a3a3a';
+        ctx.fillRect(cx-8, y+20, 16, 26);
+        // Legs
+        ctx.fillStyle = '#2c2c2c';
+        ctx.fillRect(cx-8, y+h-6, 6, 6); ctx.fillRect(cx+2, y+h-6, 6, 6);
+        // Head
+        ctx.fillStyle = '#f5d0a9'; ctx.beginPath(); ctx.arc(cx, y+14, 9, 0, Math.PI*2); ctx.fill();
+        // Hair (thinning)
+        ctx.fillStyle = '#6B4226';
+        ctx.beginPath(); ctx.arc(cx, y+11, 9, Math.PI+0.3, -0.3); ctx.fill();
+        // Rosy cheeks
+        ctx.fillStyle = 'rgba(255,100,100,0.5)';
+        ctx.beginPath(); ctx.arc(cx-5, y+16, 3, 0, Math.PI*2); ctx.fill();
+        ctx.beginPath(); ctx.arc(cx+5, y+16, 3, 0, Math.PI*2); ctx.fill();
+        // Dizzy eyes
+        ctx.fillStyle = '#333';
+        ctx.beginPath(); ctx.arc(cx-3, y+13, 1.5, 0, Math.PI*2); ctx.fill();
+        ctx.beginPath(); ctx.arc(cx+3, y+13, 1.5, 0, Math.PI*2); ctx.fill();
+        // Loosened tie
+        ctx.fillStyle = '#cc3333';
+        ctx.save(); ctx.translate(cx, y+20); ctx.rotate(0.2 * dir);
+        ctx.fillRect(-2, 0, 4, 14);
+        ctx.beginPath(); ctx.moveTo(-4, 14); ctx.lineTo(0, 20); ctx.lineTo(4, 14); ctx.closePath(); ctx.fill();
+        ctx.restore();
+        // Wine glass in hand
+        const gx = cx + 14 * dir, gy = y + 24;
+        ctx.strokeStyle = '#ccc'; ctx.lineWidth = 1.5;
+        ctx.beginPath(); ctx.moveTo(gx, gy+8); ctx.lineTo(gx, gy+3); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(gx-4, gy+8); ctx.lineTo(gx+4, gy+8); ctx.stroke();
+        ctx.strokeStyle = '#ccc'; ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.moveTo(gx-5, gy-4); ctx.lineTo(gx-3, gy+3); ctx.lineTo(gx+3, gy+3); ctx.lineTo(gx+5, gy-4); ctx.stroke();
+        ctx.fillStyle = '#8B0000';
+        ctx.beginPath(); ctx.moveTo(gx-4, gy-2); ctx.lineTo(gx-3, gy+3); ctx.lineTo(gx+3, gy+3); ctx.lineTo(gx+4, gy-2); ctx.closePath(); ctx.fill();
+        ctx.restore();
+        break;
+      }
+      case 2: { // Photographer — crouching with camera
+        const cx = x + w/2;
+        // Crouching body — khaki pants, dark shirt
+        ctx.fillStyle = '#c4a06a'; // khaki pants
+        ctx.fillRect(cx-10, y+30, 20, 18);
+        ctx.fillStyle = '#333'; // dark shirt
+        ctx.fillRect(cx-10, y+18, 20, 14);
+        // Head (looking through camera)
+        ctx.fillStyle = '#f5d0a9'; ctx.beginPath(); ctx.arc(cx-2, y+14, 8, 0, Math.PI*2); ctx.fill();
+        // Hair
+        ctx.fillStyle = '#4a3520';
+        ctx.beginPath(); ctx.arc(cx-2, y+11, 8, Math.PI, 0); ctx.fill();
+        // Camera (big black box)
+        ctx.fillStyle = '#222';
+        ctx.fillRect(cx+4, y+8, 16, 12);
+        ctx.fillStyle = '#111';
+        ctx.fillRect(cx+6, y+10, 12, 8);
+        // Lens
+        ctx.fillStyle = '#444'; ctx.beginPath(); ctx.arc(cx+20, y+14, 5, 0, Math.PI*2); ctx.fill();
+        ctx.fillStyle = '#335'; ctx.beginPath(); ctx.arc(cx+20, y+14, 3, 0, Math.PI*2); ctx.fill();
+        // Flash burst (animated blink)
+        if (frameTick % 60 < 8) {
+          ctx.fillStyle = 'rgba(255,255,200,0.8)';
+          ctx.beginPath(); ctx.arc(cx+20, y+6, 8 + Math.random()*3, 0, Math.PI*2); ctx.fill();
+          ctx.fillStyle = 'rgba(255,255,255,0.9)';
+          ctx.beginPath(); ctx.arc(cx+20, y+6, 4, 0, Math.PI*2); ctx.fill();
+        }
+        // Bent knees
+        ctx.fillStyle = '#c4a06a';
+        ctx.fillRect(cx-12, y+h-6, 7, 6);
+        ctx.fillRect(cx+5, y+h-6, 7, 6);
+        break;
+      }
+      case 3: { // Crying Baby — small child sitting on ground
+        const cx = x + w/2;
+        // Body / diaper
+        ctx.fillStyle = '#b0d4f1';
+        ctx.fillRect(cx-8, y+14, 16, 14);
+        ctx.fillStyle = '#fff';
+        ctx.fillRect(cx-7, y+22, 14, 8);
+        // Head (big for baby proportions)
+        ctx.fillStyle = '#fce4c8'; ctx.beginPath(); ctx.arc(cx, y+10, 10, 0, Math.PI*2); ctx.fill();
+        // Wispy hair
+        ctx.fillStyle = '#dbb870';
+        ctx.fillRect(cx-3, y+1, 2, 4); ctx.fillRect(cx+1, y+0, 2, 5); ctx.fillRect(cx-6, y+3, 2, 3);
+        // Crying eyes (shut tight)
+        ctx.strokeStyle = '#333'; ctx.lineWidth = 1.5;
+        ctx.beginPath(); ctx.arc(cx-4, y+10, 2, 0, Math.PI); ctx.stroke();
+        ctx.beginPath(); ctx.arc(cx+4, y+10, 2, 0, Math.PI); ctx.stroke();
+        // Open crying mouth
+        ctx.fillStyle = '#cc3333';
+        ctx.beginPath(); ctx.ellipse(cx, y+16, 4, 3, 0, 0, Math.PI*2); ctx.fill();
+        ctx.fillStyle = '#ff6666';
+        ctx.beginPath(); ctx.ellipse(cx, y+16, 2.5, 1.5, 0, 0, Math.PI*2); ctx.fill();
+        // Animated tears
+        const tearPhase = (frameTick * 0.15) % 1;
+        ctx.fillStyle = 'rgba(100,180,255,0.8)';
+        // Left tear
+        ctx.beginPath(); ctx.arc(cx-6, y+12 + tearPhase*12, 2, 0, Math.PI*2); ctx.fill();
+        ctx.beginPath(); ctx.arc(cx-5, y+8 + tearPhase*12, 1.5, 0, Math.PI*2); ctx.fill();
+        // Right tear
+        ctx.beginPath(); ctx.arc(cx+6, y+10 + ((tearPhase+0.5)%1)*12, 2, 0, Math.PI*2); ctx.fill();
+        ctx.beginPath(); ctx.arc(cx+5, y+14 + ((tearPhase+0.5)%1)*8, 1.5, 0, Math.PI*2); ctx.fill();
+        // Little arms flailing
+        const armAngle = Math.sin(frameTick * 0.2) * 0.4;
+        ctx.strokeStyle = '#fce4c8'; ctx.lineWidth = 3;
+        ctx.beginPath(); ctx.moveTo(cx-8, y+18); ctx.lineTo(cx-14, y+14 + Math.sin(frameTick*0.25)*3); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(cx+8, y+18); ctx.lineTo(cx+14, y+12 + Math.cos(frameTick*0.25)*3); ctx.stroke();
+        break;
+      }
+      case 4: { // Flower Girl — tall figure with basket, throws flaming flowers
+        const cx = x + w/2;
+        // Dress (tall pink triangle)
+        ctx.fillStyle = '#f8a4c8';
+        ctx.beginPath(); ctx.moveTo(cx, y+12); ctx.lineTo(cx-14, y+h); ctx.lineTo(cx+14, y+h); ctx.closePath(); ctx.fill();
+        ctx.fillStyle = '#f08cb0';
+        ctx.beginPath(); ctx.moveTo(cx, y+16); ctx.lineTo(cx-11, y+h); ctx.lineTo(cx+11, y+h); ctx.closePath(); ctx.fill();
+        // Head
+        ctx.fillStyle = '#f5d0a9'; ctx.beginPath(); ctx.arc(cx, y+10, 8, 0, Math.PI*2); ctx.fill();
+        // Hair
+        ctx.fillStyle = '#8B6914';
+        ctx.beginPath(); ctx.arc(cx, y+8, 8, Math.PI, 0); ctx.fill();
+        ctx.fillRect(cx-8, y+8, 3, 8); ctx.fillRect(cx+5, y+8, 3, 8);
+        // Flower crown
+        ctx.fillStyle = '#ff69b4'; ctx.beginPath(); ctx.arc(cx-5, y+4, 3, 0, Math.PI*2); ctx.fill();
+        ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(cx, y+3, 3, 0, Math.PI*2); ctx.fill();
+        ctx.fillStyle = '#ff69b4'; ctx.beginPath(); ctx.arc(cx+5, y+4, 3, 0, Math.PI*2); ctx.fill();
+        // Throwing arm (animated)
+        const throwAngle = Math.sin(frameTick * 0.12) * 0.6 - 0.8;
+        ctx.save();
+        ctx.translate(cx-8, y+22);
+        ctx.rotate(throwAngle);
+        ctx.fillStyle = '#f5d0a9';
+        ctx.fillRect(0, -2, 14, 4);
+        ctx.beginPath(); ctx.arc(14, 0, 3, 0, Math.PI*2); ctx.fill();
+        ctx.restore();
+        // Basket in other hand
+        ctx.fillStyle = '#c4883e';
+        ctx.fillRect(cx+8, y+h-25, 12, 10);
+        ctx.fillStyle = '#a87030';
+        ctx.fillRect(cx+9, y+h-24, 10, 8);
+        // Flaming flowers in basket
+        const fFlicker = Math.sin(frameTick * 0.3) * 2;
+        ctx.fillStyle = '#ff4500'; ctx.beginPath(); ctx.arc(cx+11, y+h-28+fFlicker, 3, 0, Math.PI*2); ctx.fill();
+        ctx.fillStyle = '#ff6600'; ctx.beginPath(); ctx.arc(cx+15, y+h-27-fFlicker, 2.5, 0, Math.PI*2); ctx.fill();
+        ctx.fillStyle = '#ffaa00'; ctx.beginPath(); ctx.arc(cx+13, y+h-30+fFlicker, 2.5, 0, Math.PI*2); ctx.fill();
+        break;
+      }
+      case 5: { // Rain Cloud — dark floating storm cloud with rain + lightning
+        const cx = x + w/2, cy = y + h/2;
+        // Lightning flash glow (behind cloud)
+        const lightningPhase = (frameTick + Math.floor(x)) % 90;
+        if (lightningPhase < 3) {
+          ctx.fillStyle = `rgba(255,255,200,${0.3 - lightningPhase * 0.1})`;
+          ctx.beginPath(); ctx.arc(cx, cy, 28, 0, Math.PI*2); ctx.fill();
+        }
+        // Cloud body (overlapping circles)
+        ctx.fillStyle = '#556';
+        ctx.beginPath(); ctx.arc(cx-10, cy, 12, 0, Math.PI*2); ctx.fill();
+        ctx.beginPath(); ctx.arc(cx+8, cy+2, 10, 0, Math.PI*2); ctx.fill();
+        ctx.beginPath(); ctx.arc(cx, cy-5, 13, 0, Math.PI*2); ctx.fill();
+        ctx.fillStyle = '#445';
+        ctx.beginPath(); ctx.arc(cx-6, cy+2, 10, 0, Math.PI*2); ctx.fill();
+        ctx.beginPath(); ctx.arc(cx+4, cy-2, 11, 0, Math.PI*2); ctx.fill();
+        // Animated rain drops (heavier rain)
+        ctx.fillStyle = 'rgba(100,160,255,0.7)';
+        for (let i = 0; i < 7; i++) {
+          const rx = cx - 16 + i * 5;
+          const ry = cy + 10 + ((frameTick * 2.5 + i * 11) % 30);
+          ctx.fillRect(rx, ry, 1.5, 6);
+        }
+        // Lightning bolt (intermittent)
+        if (lightningPhase < 5) {
+          ctx.strokeStyle = lightningPhase < 2 ? '#ffffaa' : 'rgba(255,255,170,0.5)';
+          ctx.lineWidth = lightningPhase < 2 ? 2 : 1;
+          ctx.beginPath();
+          ctx.moveTo(cx + 2, cy + 8);
+          ctx.lineTo(cx - 3, cy + 18);
+          ctx.lineTo(cx + 1, cy + 18);
+          ctx.lineTo(cx - 4, cy + 30);
+          ctx.stroke();
+        }
+        break;
+      }
+    }
+  }
+
+  function drawFlamingFlower(ff) {
+    const x = ff.x, y = ff.y;
+    // Flame trail
+    const flicker = Math.sin(frameTick * 0.5 + ff.x) * 2;
+    ctx.fillStyle = 'rgba(255,100,0,0.6)';
+    ctx.beginPath(); ctx.arc(x+3, y+flicker, 4, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = 'rgba(255,200,0,0.5)';
+    ctx.beginPath(); ctx.arc(x+5, y-flicker, 3, 0, Math.PI*2); ctx.fill();
+    // Flower
+    ctx.fillStyle = '#ff3366';
+    ctx.beginPath(); ctx.arc(x, y, 4, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = '#ff6b9d';
+    ctx.beginPath(); ctx.arc(x-2, y-2, 2.5, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.arc(x+2, y-2, 2.5, 0, Math.PI*2); ctx.fill();
+    // Orange glow
+    ctx.fillStyle = 'rgba(255,150,0,0.3)';
+    ctx.beginPath(); ctx.arc(x, y, 7, 0, Math.PI*2); ctx.fill();
+  }
+
+  // ============================================================
+  // DRAW COLLECTIBLES
+  // ============================================================
+  function drawCollectHeart(cx, cy) {
+    const c = '#ff6b9d', h = '#ff8db8';
+    ctx.fillStyle = c;
+    // 5×4 pixel heart on P grid
+    ctx.fillRect(cx-2*P,cy-2*P,P,P); ctx.fillRect(cx,cy-2*P,P,P);                     // bumps
+    ctx.fillRect(cx-3*P,cy-P,P,P); ctx.fillRect(cx-2*P,cy-P,P,P); ctx.fillRect(cx-P,cy-P,P,P);
+    ctx.fillRect(cx,cy-P,P,P); ctx.fillRect(cx+P,cy-P,P,P);                             // full row
+    ctx.fillRect(cx-2*P,cy,P,P); ctx.fillRect(cx-P,cy,P,P); ctx.fillRect(cx,cy,P,P);   // mid
+    ctx.fillRect(cx-P,cy+P,P,P);                                                         // point
+    ctx.fillStyle = h;
+    ctx.fillRect(cx-2*P,cy-2*P,P,P); ctx.fillRect(cx-3*P,cy-P,P,P);                    // highlight
+  }
+
+  function drawCollectRing(cx, cy) {
+    // Gold band
+    ctx.strokeStyle = '#ffd700'; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.arc(cx, cy+3, 7, 0, Math.PI*2); ctx.stroke();
+    // Inner shine
+    ctx.strokeStyle = '#ffec80'; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.arc(cx, cy+3, 5, -0.5, 1); ctx.stroke();
+    // White diamond
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath(); ctx.moveTo(cx,cy-8); ctx.lineTo(cx+5,cy-3); ctx.lineTo(cx,cy+2); ctx.lineTo(cx-5,cy-3); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = '#d0d8ff';
+    ctx.beginPath(); ctx.moveTo(cx,cy-7); ctx.lineTo(cx+3,cy-3); ctx.lineTo(cx,cy+1); ctx.closePath(); ctx.fill();
+  }
+
+  function drawCollectChampagne(cx, cy) {
+    // Body
+    ctx.fillStyle = '#2d7a2d';
+    ctx.fillRect(cx-4,cy-3,8,14);
+    // Neck
+    ctx.fillStyle = '#2d6a2d';
+    ctx.fillRect(cx-2,cy-7,4,5);
+    // Gold foil top
+    ctx.fillStyle = '#ffd700';
+    ctx.fillRect(cx-3,cy-9,6,3);
+    ctx.fillRect(cx-1,cy-11,2,2);
+    // Label
+    ctx.fillStyle = '#f5f5dc';
+    ctx.fillRect(cx-3,cy+1,6,4);
+    ctx.fillStyle = '#c8a000';
+    ctx.fillRect(cx-2,cy+2,4,2);
+    // Bubbles
+    ctx.fillStyle = 'rgba(255,255,200,0.7)';
+    ctx.fillRect(cx+1,cy-13,2,2);
+    ctx.fillRect(cx-2,cy-15,2,2);
+  }
+
+  function drawCollectBouquet(cx, cy) {
+    // Stems
+    ctx.fillStyle = '#3a8a3a';
+    ctx.fillRect(cx-1, cy+2, 2, 10);
+    ctx.fillRect(cx-3, cy+4, 2, 8);
+    ctx.fillRect(cx+1, cy+3, 2, 9);
+    // Ribbon bow
+    ctx.fillStyle = '#ff69b4';
+    ctx.fillRect(cx-4, cy+2, 3, 2);
+    ctx.fillRect(cx+1, cy+2, 3, 2);
+    ctx.fillStyle = '#e0559e';
+    ctx.fillRect(cx-1, cy+1, 2, 3);
+    // Flower cluster — big colorful blossoms
+    const flowers = [
+      {dx:0,dy:-6,r:5,c:'#ff69b4'}, {dx:-5,dy:-3,r:4,c:'#ffffff'},
+      {dx:5,dy:-4,r:4,c:'#ff8fab'}, {dx:-3,dy:-8,r:3.5,c:'#ffc0cb'},
+      {dx:3,dy:-9,r:3.5,c:'#ffffff'}, {dx:0,dy:-11,r:3,c:'#ff69b4'},
+    ];
+    for (const f of flowers) {
+      ctx.fillStyle = f.c;
+      ctx.beginPath(); ctx.arc(cx+f.dx, cy+f.dy, f.r, 0, Math.PI*2); ctx.fill();
+    }
+    // Yellow centers
+    ctx.fillStyle = '#ffd700';
+    ctx.beginPath(); ctx.arc(cx, cy-6, 2, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.arc(cx-4, cy-3, 1.5, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.arc(cx+4, cy-4, 1.5, 0, Math.PI*2); ctx.fill();
+  }
+
+  function drawCollectTiara(cx, cy) {
+    // Gold band (arc)
+    ctx.strokeStyle = '#ffd700'; ctx.lineWidth = 2.5;
+    ctx.beginPath(); ctx.arc(cx, cy + 4, 9, Math.PI, 0); ctx.stroke();
+    // 5 triangular points
+    const pts = [-8, -4, 0, 4, 8];
+    for (let i = 0; i < pts.length; i++) {
+      const px = cx + pts[i];
+      const h = i === 2 ? -10 : -7; // center point taller
+      ctx.fillStyle = '#ffd700';
+      ctx.beginPath();
+      ctx.moveTo(px - 3, cy - 1);
+      ctx.lineTo(px, cy + h);
+      ctx.lineTo(px + 3, cy - 1);
+      ctx.closePath();
+      ctx.fill();
+      // Highlight
+      ctx.fillStyle = '#fff8dc';
+      ctx.beginPath();
+      ctx.moveTo(px - 1, cy - 2);
+      ctx.lineTo(px, cy + h + 2);
+      ctx.lineTo(px + 1, cy - 2);
+      ctx.closePath();
+      ctx.fill();
+      // Gem at tip
+      const gemColor = i % 2 === 0 ? '#e0b0ff' : '#ff69b4';
+      ctx.fillStyle = gemColor;
+      ctx.beginPath(); ctx.arc(px, cy + h + 1, 1.5, 0, Math.PI * 2); ctx.fill();
+    }
+    // Animated sparkles orbiting
+    for (let s = 0; s < 3; s++) {
+      const angle = (frameTick * 0.06) + s * (Math.PI * 2 / 3);
+      const sx = cx + Math.cos(angle) * 13;
+      const sy = cy - 4 + Math.sin(angle) * 8;
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(sx - 1, sy - 1, 2, 2);
+    }
+  }
+
+  function drawCollectMagnet(cx, cy) {
+    // Horseshoe magnet shape
+    // Red top half of U-shape
+    ctx.strokeStyle = '#ff3333'; ctx.lineWidth = 5;
+    ctx.beginPath(); ctx.arc(cx, cy, 8, Math.PI, 0); ctx.stroke();
+    // Left leg
+    ctx.fillStyle = '#ff3333';
+    ctx.fillRect(cx - 10, cy - 1, 5, 10);
+    // Right leg
+    ctx.fillRect(cx + 5, cy - 1, 5, 10);
+    // Silver tips on legs
+    ctx.fillStyle = '#c0c0c0';
+    ctx.fillRect(cx - 10, cy + 5, 5, 5);
+    ctx.fillRect(cx + 5, cy + 5, 5, 5);
+    // Highlight on arc
+    ctx.strokeStyle = '#ff6666'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(cx, cy, 6, Math.PI + 0.3, -0.3); ctx.stroke();
+    // Magnetic field lines (animated)
+    ctx.strokeStyle = 'rgba(0, 229, 255, 0.5)'; ctx.lineWidth = 1;
+    for (let i = 0; i < 3; i++) {
+      const offset = ((frameTick * 0.08 + i * 0.7) % 2) * 5;
+      ctx.beginPath();
+      ctx.arc(cx, cy + 10 + offset, 3 + i * 2, 0, Math.PI);
+      ctx.stroke();
+    }
+    // Pulsing glow
+    const glowR = 12 + Math.sin(frameTick * 0.1) * 3;
+    ctx.fillStyle = 'rgba(0, 229, 255, 0.12)';
+    ctx.beginPath(); ctx.arc(cx, cy - 3, glowR, 0, Math.PI * 2); ctx.fill();
+  }
+
+  function drawCollectible(col) {
+    const bob = Math.sin((frameTick - col.tick) * 0.08) * 3;
+    const cx = col.x, cy = col.baseY + bob;
+
+    // Glow (rainbow for bouquet, gold for tiara, cyan for magnet, yellow for others)
+    if (col.type === 3) {
+      const hue = (frameTick * 6) % 360;
+      ctx.fillStyle = `hsla(${hue}, 100%, 70%, 0.15)`;
+      ctx.beginPath(); ctx.arc(cx, cy, 22, 0, Math.PI*2); ctx.fill();
+    } else if (col.type === 4) {
+      ctx.fillStyle = 'rgba(255, 215, 0, 0.15)';
+      ctx.beginPath(); ctx.arc(cx, cy, 20, 0, Math.PI*2); ctx.fill();
+    } else if (col.type === 5) {
+      ctx.fillStyle = 'rgba(0, 229, 255, 0.15)';
+      ctx.beginPath(); ctx.arc(cx, cy, 20, 0, Math.PI*2); ctx.fill();
+    } else {
+      ctx.fillStyle = 'rgba(255,255,200,0.08)';
+      ctx.beginPath(); ctx.arc(cx, cy, 16, 0, Math.PI*2); ctx.fill();
+    }
+
+    // Magnet active: draw cyan ring around collectibles being pulled
+    if (magnetTimer > 0) {
+      const dx = player.x - col.x, dy = (player.y - 16) - col.baseY;
+      if (dx * dx + dy * dy < 150 * 150) {
+        ctx.strokeStyle = 'rgba(0, 229, 255, 0.3)';
+        ctx.lineWidth = 1.5;
+        ctx.beginPath(); ctx.arc(cx, cy, 18, 0, Math.PI*2); ctx.stroke();
+      }
+    }
+
+    switch (col.type) {
+      case 0: drawCollectHeart(cx, cy); break;
+      case 1: drawCollectRing(cx, cy); break;
+      case 2: drawCollectChampagne(cx, cy); break;
+      case 3: drawCollectBouquet(cx, cy); break;
+      case 4: drawCollectTiara(cx, cy); break;
+      case 5: drawCollectMagnet(cx, cy); break;
+    }
+  }
+
+  // ============================================================
+  // DRAW HUD
+  // ============================================================
+  function drawHudHeart(hx, hy, filled) {
+    ctx.fillStyle = filled ? '#ff3366' : '#332233';
+    // Row 0: bumps
+    ctx.fillRect(hx, hy, P, P);
+    ctx.fillRect(hx + 2*P, hy, P, P);
+    // Row 1: full
+    for (let i = 0; i < 3; i++) ctx.fillRect(hx + i*P, hy + P, P, P);
+    // Row 2: point
+    ctx.fillRect(hx + P, hy + 2*P, P, P);
+    if (filled) {
+      ctx.fillStyle = '#ff6690';
+      ctx.fillRect(hx, hy, P, P);
+    }
+  }
+
+  function drawProgressBar() {
+    const barX = 250;
+    const barY = 8;
+    const barW = 300;
+    const barH = 12;
+    const progress = Math.min(distanceTraveled / WIN_DISTANCE, 1);
+
+    // Border
+    ctx.fillStyle = '#1a1a2e';
+    ctx.fillRect(barX - 2, barY - 2, barW + 4, barH + 4);
+
+    // Dark background
+    ctx.fillStyle = '#0d0d1a';
+    ctx.fillRect(barX, barY, barW, barH);
+
+    // Fill gradient (pink → gold)
+    if (progress > 0) {
+      const fillW = barW * progress;
+      const grad = ctx.createLinearGradient(barX, 0, barX + barW, 0);
+      grad.addColorStop(0, '#ff6b9d');
+      grad.addColorStop(0.5, '#ff8f6b');
+      grad.addColorStop(1, '#ffd700');
+      ctx.fillStyle = grad;
+      ctx.fillRect(barX, barY, fillW, barH);
+
+      // Shine line on top of fill
+      ctx.fillStyle = 'rgba(255,255,255,0.15)';
+      ctx.fillRect(barX, barY, fillW, 3);
+    }
+
+    // Bride icon (replaces progress dot)
+    const bx = Math.min(barX + barW * progress, barX + barW);
+    const by = barY + barH / 2;
+    // White dress (triangle)
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath();
+    ctx.moveTo(bx - 4, by + 6);
+    ctx.lineTo(bx + 4, by + 6);
+    ctx.lineTo(bx, by - 1);
+    ctx.closePath();
+    ctx.fill();
+    // Head
+    ctx.fillStyle = '#ffd5c2';
+    ctx.beginPath(); ctx.arc(bx, by - 3, 3, 0, Math.PI * 2); ctx.fill();
+    // Veil
+    ctx.fillStyle = 'rgba(255,255,255,0.7)';
+    ctx.fillRect(bx - 1, by - 6, 3, 3);
+
+    // Goal marker — altar with groom at right end
+    const gx = barX + barW + 10;
+    const gy = barY + barH / 2;
+    // Altar (small arch)
+    ctx.strokeStyle = '#ffd700'; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.arc(gx, gy + 1, 5, Math.PI, 0); ctx.stroke();
+    ctx.fillStyle = '#ffd700';
+    ctx.fillRect(gx - 5, gy + 1, 1.5, 6);
+    ctx.fillRect(gx + 3.5, gy + 1, 1.5, 6);
+    // Groom (tiny figure under arch)
+    ctx.fillStyle = '#1a1a2e';
+    ctx.fillRect(gx - 2, gy, 4, 5); // suit
+    ctx.fillStyle = '#ffd5c2';
+    ctx.beginPath(); ctx.arc(gx, gy - 1, 2, 0, Math.PI * 2); ctx.fill(); // head
+
+    // Live timer under progress bar
+    if (gameState === State.PLAYING) {
+      const elapsed = (playFrames / 60).toFixed(1);
+      ctx.font = '10px monospace';
+      ctx.fillStyle = '#f5e0c8';
+      ctx.textAlign = 'center';
+      ctx.fillText(elapsed + 's', barX + barW / 2, barY + barH + 16);
+    }
+  }
+
+  function drawHUD() {
+    // --- Top-left: HP hearts ---
+    for (let i = 0; i < 3; i++) {
+      drawHudHeart(12 + i * 15, 10, i < hp);
+    }
+
+    // --- Top-center: Progress bar ---
+    drawProgressBar();
+
+    // --- Top-right: Score ---
+    const scoreStr = 'SCORE: ' + String(score).padStart(4, '0');
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 14px monospace';
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'top';
+    ctx.fillText(scoreStr, CANVAS_W - 12, 10);
+
+    // --- Powerup indicators (stacked below score) ---
+    let indicatorY = 28;
+    ctx.font = 'bold 12px monospace';
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'top';
+    if (boostTimer > 0 && Math.floor(frameTick / 8) % 2 === 0) {
+      ctx.fillStyle = '#ffd700';
+      ctx.fillText('\u26A1 BOOST!', CANVAS_W - 12, indicatorY);
+      indicatorY += 14;
+    }
+    if (boostTimer > 0 && Math.floor(frameTick / 8) % 2 !== 0) {
+      indicatorY += 14; // reserve space even when flashing off
+    }
+    if (invincibleTimer > 0) {
+      const hue = (frameTick * 10) % 360;
+      ctx.fillStyle = `hsl(${hue}, 100%, 55%)`;
+      ctx.fillText('\u2B50 INVINCIBLE!', CANVAS_W - 12, indicatorY);
+      indicatorY += 14;
+    }
+    if (multiplierTimer > 0) {
+      ctx.fillStyle = (Math.floor(frameTick / 10) % 2 === 0) ? '#ffd700' : '#e0b0ff';
+      ctx.fillText('2X SCORE!', CANVAS_W - 12, indicatorY);
+      indicatorY += 14;
+    }
+    if (magnetTimer > 0) {
+      ctx.fillStyle = '#00e5ff';
+      ctx.fillText('MAGNET!', CANVAS_W - 12, indicatorY);
+      indicatorY += 14;
+    }
+  }
+
+  // ============================================================
+  // MUTE BUTTON
+  // ============================================================
+  const MUTE_X = CANVAS_W - 32;
+  const MUTE_Y = CANVAS_H - 28;
+  const MUTE_SIZE = 20;
+
+  function drawMuteButton() {
+    const x = MUTE_X, y = MUTE_Y, s = MUTE_SIZE;
+    ctx.globalAlpha = 0.5;
+    ctx.fillStyle = '#ffffff';
+    // Speaker body
+    ctx.fillRect(x, y + 6, 6, 8);
+    ctx.beginPath();
+    ctx.moveTo(x + 6, y + 4);
+    ctx.lineTo(x + 12, y);
+    ctx.lineTo(x + 12, y + s);
+    ctx.lineTo(x + 6, y + 16);
+    ctx.closePath();
+    ctx.fill();
+    if (muted) {
+      // X mark
+      ctx.strokeStyle = '#ff4444';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(x + 14, y + 4); ctx.lineTo(x + s, y + 16);
+      ctx.moveTo(x + s, y + 4); ctx.lineTo(x + 14, y + 16);
+      ctx.stroke();
+    } else {
+      // Sound waves
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.arc(x + 13, y + 10, 4, -0.6, 0.6); ctx.stroke();
+      ctx.beginPath(); ctx.arc(x + 13, y + 10, 7, -0.6, 0.6); ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  function isMuteClick(canvasX, canvasY) {
+    return canvasX >= MUTE_X - 4 && canvasX <= MUTE_X + MUTE_SIZE + 4 &&
+           canvasY >= MUTE_Y - 4 && canvasY <= MUTE_Y + MUTE_SIZE + 4;
+  }
+
+  function getCanvasCoords(clientX, clientY) {
+    const rect = canvas.getBoundingClientRect();
+    return {
+      x: (clientX - rect.left) / rect.width * CANVAS_W,
+      y: (clientY - rect.top) / rect.height * CANVAS_H,
+    };
+  }
+
+  // ============================================================
+  // RENDER HELPERS
+  // ============================================================
+  function drawTiledLayer(lc, tW, par) {
+    const off = (scrollX * par) % tW;
+    for (let x = -off; x < CANVAS_W; x += tW) ctx.drawImage(lc, x, 0);
+  }
+
+  function drawPetals() {
+    for (const p of petals) {
+      // Animate drift
+      const px = (p.x + frameTick * p.drift + Math.sin(frameTick * 0.02 + p.phase) * 15) % (CANVAS_W + 20) - 10;
+      const py = (p.y + frameTick * p.fall) % (CANVAS_H * 0.8);
+      const wobble = Math.sin(frameTick * 0.04 + p.phase) * 0.5;
+      ctx.save();
+      ctx.globalAlpha = 0.5;
+      ctx.translate(px, py);
+      ctx.rotate(wobble);
+      ctx.fillStyle = p.color;
+      ctx.beginPath();
+      ctx.ellipse(0, 0, p.size, p.size * 0.6, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  // ============================================================
+  // RENDER
+  // ============================================================
+  function render() {
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+
+    if (gameState === State.TITLE) {
+      // Full scenery backdrop (static)
+      ctx.drawImage(skyCanvas, 0, 0);
+      drawPetals();
+      drawTiledLayer(farHillCanvas, FAR_TILE_W, 0.15);
+      drawTiledLayer(midCanvas, MID_TILE_W, 0.4);
+      drawTiledLayer(groundCanvas, GND_TILE_W, 1.0);
+
+      // Ambient confetti
+      for (const c of titleConfetti) {
+        ctx.globalAlpha = 0.5;
+        ctx.fillStyle = c.color;
+        ctx.save();
+        ctx.translate(c.x, c.y);
+        ctx.rotate(c.spin * frameTick);
+        ctx.fillRect(-c.size / 2, -c.size / 2, c.size, c.size);
+        ctx.restore();
+      }
+      ctx.globalAlpha = 1;
+
+      // Amanda (left of center) facing right
+      const amandaTitleX = CANVAS_W / 2 - 40;
+      drawBride(amandaTitleX, GROUND_Y, 0, false, null);
+
+      // Anthony (right of center) facing left
+      const anthonyTitleX = CANVAS_W / 2 + 40;
+      drawGroom(anthonyTitleX, GROUND_Y);
+
+      // Bobbing heart between them
+      const heartBob = Math.sin(frameTick * 0.06) * 4;
+      const heartCX = CANVAS_W / 2;
+      const heartCY = GROUND_Y - 24 + heartBob;
+      drawBigHeart(heartCX, heartCY, 0.6);
+
+      // Slight dark overlay for text readability
+      ctx.fillStyle = 'rgba(0,0,0,0.3)';
+      ctx.fillRect(0, 0, CANVAS_W, 130);
+
+      // Title: "HERE RUNS THE BRIDE" with drop shadow
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.font = 'bold 44px monospace';
+      // Shadow
+      ctx.fillStyle = '#5a3520';
+      ctx.fillText('HERE RUNS THE BRIDE', CANVAS_W / 2 + 2, 52);
+      // Gold text
+      ctx.fillStyle = '#ffd700';
+      ctx.fillText('HERE RUNS THE BRIDE', CANVAS_W / 2, 50);
+
+      // Subtitle
+      ctx.font = '18px monospace';
+      ctx.fillStyle = '#ffffff';
+      ctx.fillText('Amanda & Anthony \u2014 11.14.26', CANVAS_W / 2, 90);
+
+      // Top 10 Leaderboard (right side)
+      {
+        const entries = loadTopScores();
+        if (entries.length > 0) {
+          const lx = 670, ly = 140;
+          ctx.fillStyle = 'rgba(0,0,0,0.35)';
+          ctx.fillRect(lx - 80, ly - 18, 160, Math.min(entries.length, 10) * 18 + 30);
+          ctx.textAlign = 'center';
+          ctx.font = 'bold 12px monospace';
+          ctx.fillStyle = '#ffd700';
+          ctx.fillText('TOP SCORES', lx, ly);
+          ctx.font = '11px monospace';
+          for (let i = 0; i < Math.min(entries.length, 10); i++) {
+            const row = ly + 18 + i * 18;
+            ctx.fillStyle = i === 0 ? '#ffd700' : (i < 3 ? '#f5e0c8' : '#ccbbaa');
+            ctx.textAlign = 'right';
+            ctx.fillText((i + 1) + '.', lx - 42, row);
+            ctx.textAlign = 'left';
+            const name = (entries[i].name || '???').substring(0, 8).padEnd(8, ' ');
+            ctx.fillText(name + ' ' + String(entries[i].score).padStart(5, ' '), lx - 35, row);
+          }
+        }
+      }
+
+      // Blinking start prompt
+      if (Math.floor(frameTick / 40) % 2 === 0) {
+        ctx.font = '16px monospace';
+        ctx.fillStyle = '#ffffff';
+        ctx.textAlign = 'center';
+        const promptText = hasInteracted ? 'Press SPACE or Tap to Start' : '\u266b Tap anywhere to begin \u266b';
+        ctx.fillText(promptText, CANVAS_W / 2, CANVAS_H - 38);
+      }
+
+      // Bottom line: name, help, mute — spaced across width
+      ctx.font = '13px monospace';
+      ctx.fillStyle = '#ffffff';
+      const bottomY = CANVAS_H - 14;
+      if (playerName) {
+        ctx.textAlign = 'left';
+        ctx.fillText(playerName + '  [N] Change Name', 16, bottomY);
+      }
+      ctx.textAlign = 'center';
+      ctx.fillText('[H] How to Play', CANVAS_W / 2, bottomY);
+      ctx.textAlign = 'right';
+      ctx.fillText('[M] ' + (muted ? 'Unmute' : 'Mute'), CANVAS_W - 50, bottomY);
+
+    } else if (gameState === State.HELP) {
+      // How to Play screen
+      ctx.drawImage(skyCanvas, 0, 0);
+      drawPetals();
+      drawTiledLayer(farHillCanvas, FAR_TILE_W, 0.15);
+      drawTiledLayer(midCanvas, MID_TILE_W, 0.4);
+      drawTiledLayer(groundCanvas, GND_TILE_W, 1.0);
+
+      // Dark overlay for readability
+      ctx.fillStyle = 'rgba(0,0,0,0.7)';
+      ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+
+      // Header
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.font = 'bold 28px monospace';
+      ctx.fillStyle = '#ffd700';
+      ctx.fillText('HOW TO PLAY', CANVAS_W / 2, 30);
+
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'top';
+      const leftX = 50;
+      const rightX = 420;
+      let y;
+
+      // === LEFT COLUMN ===
+
+      // Controls
+      y = 58;
+      ctx.font = 'bold 14px monospace';
+      ctx.fillStyle = '#ffd700';
+      ctx.fillText('CONTROLS', leftX, y);
+      y += 20;
+      ctx.font = '12px monospace';
+      ctx.fillStyle = '#f5e0c8';
+      ctx.fillText('SPACE / TAP \u2014 Jump', leftX + 8, y); y += 16;
+      ctx.fillText('SPACE x2 \u2014 Double Jump', leftX + 8, y); y += 16;
+      ctx.fillText('Jump over obstacles to', leftX + 8, y); y += 14;
+      ctx.fillText('reach the altar!', leftX + 8, y); y += 22;
+
+      // Health
+      ctx.font = 'bold 14px monospace';
+      ctx.fillStyle = '#ffd700';
+      ctx.fillText('HEALTH', leftX, y); y += 20;
+      ctx.font = '12px monospace';
+      ctx.fillStyle = '#f5e0c8';
+      // Draw 3 mini hearts
+      for (let i = 0; i < 3; i++) {
+        drawHudHeart(leftX + 12 + i * 15, y, true);
+      }
+      ctx.fillText('3 hits and it\'s game over', leftX + 58, y + 2); y += 22;
+
+      // Obstacles
+      ctx.font = 'bold 14px monospace';
+      ctx.fillStyle = '#ffd700';
+      ctx.fillText('OBSTACLES', leftX, y); y += 20;
+      ctx.font = '11px monospace';
+      ctx.fillStyle = '#f5e0c8';
+      const obstacles_info = [
+        ['Mother-in-Law', 'Shakes fist angrily'],
+        ['Drunk Uncle', 'Paces back and forth'],
+        ['Photographer', 'Blocks the aisle'],
+        ['Crying Baby', 'Sits in your path'],
+        ['Flower Girl', 'Throws flaming flowers!'],
+        ['Rain Cloud', 'Floats with lightning'],
+      ];
+      for (const [name, desc] of obstacles_info) {
+        ctx.fillStyle = '#ffffff';
+        ctx.fillText(name, leftX + 8, y);
+        ctx.fillStyle = '#b0a090';
+        ctx.fillText(' \u2014 ' + desc, leftX + 8 + ctx.measureText(name).width, y);
+        y += 15;
+      }
+
+      // === RIGHT COLUMN ===
+
+      // Items
+      y = 58;
+      ctx.font = 'bold 14px monospace';
+      ctx.fillStyle = '#ffd700';
+      ctx.fillText('ITEMS & POWERUPS', rightX, y); y += 22;
+
+      // Item rows with mini sprites
+      const itemRows = [
+        [0, 'Heart', 'Restores 1 HP'],
+        [1, 'Ring', '+25 pts'],
+        [2, 'Champagne', '+10 pts, Speed boost (2s)'],
+        [3, 'Bouquet', '+10 pts, Invincibility (5s)'],
+        [4, 'Tiara', '+10 pts, 2x Score (8s)'],
+        [5, 'Magnet', '+10 pts, Pulls items (5s)'],
+      ];
+      ctx.save();
+      for (const [type, name, desc] of itemRows) {
+        // Draw mini collectible sprite
+        const spriteX = rightX + 12;
+        const spriteY = y + 8;
+        ctx.save();
+        ctx.translate(spriteX, spriteY);
+        ctx.scale(0.8, 0.8);
+        switch (type) {
+          case 0: drawCollectHeart(0, 0); break;
+          case 1: drawCollectRing(0, 0); break;
+          case 2: drawCollectChampagne(0, 0); break;
+          case 3: drawCollectBouquet(0, 0); break;
+          case 4: drawCollectTiara(0, 0); break;
+          case 5: drawCollectMagnet(0, 0); break;
+        }
+        ctx.restore();
+        // Label and description
+        ctx.font = '11px monospace';
+        ctx.fillStyle = '#ffffff';
+        ctx.fillText(name, rightX + 30, y + 2);
+        ctx.fillStyle = '#b0a090';
+        ctx.fillText(desc, rightX + 30, y + 14);
+        y += 28;
+      }
+      ctx.restore();
+
+      // Scoring
+      y += 6;
+      ctx.font = 'bold 14px monospace';
+      ctx.fillStyle = '#ffd700';
+      ctx.fillText('SPEED BONUS', rightX, y); y += 20;
+      ctx.font = '11px monospace';
+      ctx.fillStyle = '#f5e0c8';
+      ctx.fillText('Grab champagne for a speed', rightX + 8, y); y += 14;
+      ctx.fillText('bonus multiplier!', rightX + 8, y); y += 16;
+      ctx.fillStyle = '#ffffff';
+      ctx.fillText('1 = 1.5x  2 = 2x  3 = 2.5x', rightX + 8, y); y += 14;
+      ctx.fillText('4 = 3x  5 = 3.5x  6+ = 4x', rightX + 8, y);
+
+      // Footer
+      if (Math.floor(frameTick / 40) % 2 === 0) {
+        ctx.textAlign = 'center';
+        ctx.font = '14px monospace';
+        ctx.fillStyle = '#f5e0c8';
+        ctx.fillText('Press SPACE, H, or Tap to go back', CANVAS_W / 2, CANVAS_H - 20);
+      }
+
+    } else if (gameState === State.NAME_ENTRY) {
+      // Name input screen (first launch only)
+      ctx.drawImage(skyCanvas, 0, 0);
+      drawPetals();
+      drawTiledLayer(farHillCanvas, FAR_TILE_W, 0.15);
+      drawTiledLayer(midCanvas, MID_TILE_W, 0.4);
+      drawTiledLayer(groundCanvas, GND_TILE_W, 1.0);
+
+      // Dark overlay for readability
+      ctx.fillStyle = 'rgba(0,0,0,0.45)';
+      ctx.fillRect(0, CANVAS_H / 2 - 90, CANVAS_W, 180);
+
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+
+      // Prompt
+      ctx.font = 'bold 28px monospace';
+      ctx.fillStyle = '#ffd700';
+      ctx.fillText('ENTER YOUR NAME', CANVAS_W / 2, CANVAS_H / 2 - 50);
+
+      // Input box
+      const boxW = 220, boxH = 36;
+      const boxX = CANVAS_W / 2 - boxW / 2;
+      const boxY = CANVAS_H / 2 - boxH / 2;
+      ctx.fillStyle = 'rgba(255,255,255,0.15)';
+      ctx.fillRect(boxX, boxY, boxW, boxH);
+      ctx.strokeStyle = '#ffd700';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(boxX, boxY, boxW, boxH);
+
+      // Name text with blinking cursor
+      ctx.font = 'bold 22px monospace';
+      ctx.fillStyle = '#ffffff';
+      const cursor = Math.floor(frameTick / 30) % 2 === 0 ? '|' : '';
+      ctx.fillText(nameEntryBuffer + cursor, CANVAS_W / 2, CANVAS_H / 2);
+
+      // Instructions
+      ctx.font = '14px monospace';
+      ctx.fillStyle = '#f5e0c8';
+      ctx.fillText('Press ENTER to confirm', CANVAS_W / 2, CANVAS_H / 2 + 50);
+
+    } else if (gameState === State.READY) {
+      // "GET READY!" → "LET'S GO!" countdown screen
+      ctx.drawImage(skyCanvas, 0, 0);
+      drawPetals();
+      drawTiledLayer(farHillCanvas, FAR_TILE_W, 0.15);
+      drawTiledLayer(midCanvas, MID_TILE_W, 0.4);
+      drawTiledLayer(groundCanvas, GND_TILE_W, 1.0);
+
+      // Draw Amanda standing ready
+      drawBride(120, GROUND_Y, 0, false, null);
+
+      // Slight overlay for text pop
+      ctx.fillStyle = 'rgba(0,0,0,0.25)';
+      ctx.fillRect(0, CANVAS_H / 2 - 60, CANVAS_W, 120);
+
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+
+      if (readyTimer < 120) {
+        // "GET READY!" phase — text scales in with bounce
+        const progress = Math.min(readyTimer / 60, 1);
+        const scale = progress < 0.3 ? progress / 0.3 * 1.3 : (progress < 0.5 ? 1.3 - (progress - 0.3) / 0.2 * 0.3 : 1.0);
+        ctx.save();
+        ctx.translate(CANVAS_W / 2, CANVAS_H / 2);
+        ctx.scale(scale, scale);
+        ctx.font = 'bold 52px monospace';
+        ctx.fillStyle = '#5a3520';
+        ctx.fillText('GET READY!', 2, 2);
+        ctx.fillStyle = '#ffd700';
+        ctx.fillText('GET READY!', 0, 0);
+        ctx.restore();
+        // Subtitle
+        if (readyTimer > 20) {
+          ctx.font = '18px monospace';
+          ctx.fillStyle = '#ffffff';
+          ctx.globalAlpha = Math.min((readyTimer - 20) / 15, 1);
+          ctx.fillText('Help Amanda reach the altar!', CANVAS_W / 2, CANVAS_H / 2 + 40);
+          ctx.globalAlpha = 1;
+        }
+      } else {
+        // "LET'S GO!!" phase — big, flashing rainbow text
+        const flash = Math.floor(readyTimer / 3) % 2;
+        const goScale = 1.2 + Math.sin(readyTimer * 0.3) * 0.15;
+        ctx.save();
+        ctx.translate(CANVAS_W / 2, CANVAS_H / 2);
+        ctx.scale(goScale, goScale);
+        ctx.font = 'bold 60px monospace';
+        const hue = (readyTimer * 12) % 360;
+        ctx.fillStyle = '#5a3520';
+        ctx.fillText("LET'S GO!!", 3, 3);
+        ctx.fillStyle = flash ? `hsl(${hue}, 100%, 60%)` : '#ffd700';
+        ctx.fillText("LET'S GO!!", 0, 0);
+        ctx.restore();
+      }
+
+    } else if (gameState === State.PLAYING) {
+      // Screen shake
+      if (shakeTimer > 0) {
+        const sx = (Math.random() - 0.5) * 6;
+        const sy = (Math.random() - 0.5) * 6;
+        ctx.save();
+        ctx.translate(sx, sy);
+      }
+      ctx.drawImage(skyCanvas, 0, 0);
+      drawPetals();
+      drawTiledLayer(farHillCanvas, FAR_TILE_W, 0.15);
+      drawTiledLayer(midCanvas, MID_TILE_W, 0.4);
+      drawTiledLayer(groundCanvas, GND_TILE_W, 1.0);
+
+      // Obstacles
+      for (const obs of obstacles) drawObstacle(obs);
+      for (const ff of flamingFlowers) drawFlamingFlower(ff);
+
+      // Collectibles
+      for (const col of collectibles) drawCollectible(col);
+
+      // Sparkles (behind Amanda)
+      for (const s of sparkles) {
+        const alpha = s.life / 15;
+        ctx.fillStyle = s.color;
+        ctx.globalAlpha = alpha;
+        ctx.fillRect(s.x, s.y, s.size, s.size);
+      }
+      ctx.globalAlpha = 1;
+
+      // Invincible rainbow glow (larger, takes priority)
+      if (invincibleTimer > 0) {
+        const hue = (frameTick * 8) % 360;
+        const glowAlpha = invincibleTimer > 60 ? 0.2 : (Math.floor(frameTick/4)%2===0 ? 0.2 : 0);
+        if (glowAlpha > 0) {
+          ctx.fillStyle = `hsla(${hue}, 100%, 60%, ${glowAlpha})`;
+          ctx.beginPath();
+          ctx.ellipse(player.x, player.y - 16, 30, 28, 0, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+      // Boost glow
+      if (boostTimer > 0 && invincibleTimer <= 0) {
+        const glowAlpha = 0.12 + Math.sin(frameTick * 0.25) * 0.06;
+        ctx.fillStyle = `rgba(255, 215, 0, ${glowAlpha})`;
+        ctx.beginPath();
+        ctx.ellipse(player.x, player.y - 16, 24, 22, 0, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      // Multiplier gold glow
+      if (multiplierTimer > 0 && invincibleTimer <= 0) {
+        const ga = 0.1 + Math.sin(frameTick * 0.15) * 0.05;
+        ctx.fillStyle = `rgba(224, 176, 255, ${ga})`;
+        ctx.beginPath();
+        ctx.ellipse(player.x, player.y - 16, 22, 20, 0, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      // Magnet cyan glow
+      if (magnetTimer > 0 && invincibleTimer <= 0) {
+        const ga = 0.1 + Math.sin(frameTick * 0.2) * 0.06;
+        ctx.fillStyle = `rgba(0, 229, 255, ${ga})`;
+        ctx.beginPath();
+        ctx.ellipse(player.x, player.y - 16, 26, 24, 0, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      // Amanda
+      let tint = null;
+      if (invincibleTimer > 0) {
+        // Rainbow flash — blink on/off in last second as warning
+        if (invincibleTimer > 60 || Math.floor(frameTick/4)%2 === 0) {
+          tint = RAINBOW_COLORS[Math.floor(frameTick / 4) % RAINBOW_COLORS.length];
+        }
+      } else if (flashTimer > 0 && Math.floor(frameTick/3)%2===0) {
+        tint = '#ff3333';
+      }
+      drawBride(player.x, player.y, player.animFrame, !player.grounded, tint);
+
+      // Particles (on top)
+      for (const p of particles) {
+        const alpha = p.life / 20;
+        ctx.globalAlpha = alpha;
+        ctx.fillStyle = p.color;
+        ctx.fillRect(p.x - 1, p.y - 1, 3, 3);
+      }
+      ctx.globalAlpha = 1;
+
+      // Floating texts
+      for (const ft of floatingTexts) {
+        const alpha = ft.life / 45;
+        const rise = (45 - ft.life) * 0.8;
+        ctx.globalAlpha = alpha;
+        ctx.fillStyle = '#ffffff';
+        ctx.font = 'bold 14px monospace';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(ft.text, ft.x, ft.y - rise);
+        ctx.globalAlpha = 1;
+      }
+
+      // Jump hint on first play
+      if (jumpHintTimer > 0) {
+        ctx.globalAlpha = Math.min(jumpHintTimer / 30, 1) * 0.7;
+        ctx.fillStyle = '#ffffff';
+        ctx.font = '16px monospace';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('TAP TO JUMP \u2022 DOUBLE TAP FOR DOUBLE JUMP', CANVAS_W / 2, CANVAS_H / 2 + 40);
+        ctx.globalAlpha = 1;
+      }
+
+      // HUD
+      drawHUD();
+
+      if (shakeTimer > 0) ctx.restore();
+
+    } else if (gameState === State.GAMEOVER) {
+      ctx.drawImage(skyCanvas, 0, 0);
+      drawPetals();
+      drawTiledLayer(farHillCanvas, FAR_TILE_W, 0.15);
+      drawTiledLayer(midCanvas, MID_TILE_W, 0.4);
+      drawTiledLayer(groundCanvas, GND_TILE_W, 1.0);
+      for (const obs of obstacles) drawObstacle(obs);
+      for (const ff of flamingFlowers) drawFlamingFlower(ff);
+      for (const col of collectibles) drawCollectible(col);
+
+      // Amanda stumble animation
+      if (gameOverPhase === 0) {
+        // Tilting over 15 frames
+        const t = Math.min(gameOverTimer / 15, 1);
+        const tiltAngle = t * 0.55; // ~31 degrees
+        const dropY = t * 6;
+        ctx.save();
+        ctx.translate(player.x, player.y + dropY);
+        ctx.rotate(tiltAngle);
+        ctx.translate(-player.x, -(player.y + dropY));
+        drawBride(player.x, player.y + dropY, 0, false, '#ff3333');
+        ctx.restore();
+      } else {
+        // Final stumble pose (tilted, dropped)
+        ctx.save();
+        ctx.translate(player.x, player.y + 6);
+        ctx.rotate(0.55);
+        ctx.translate(-player.x, -(player.y + 6));
+        drawBride(player.x, player.y + 6, 0, false, null);
+        ctx.restore();
+      }
+
+      // Phase 2: overlay with text
+      if (gameOverPhase === 2) {
+        const fadeAlpha = Math.min(gameOverTimer / 40, 1);
+
+        // Dark overlay
+        ctx.globalAlpha = fadeAlpha * 0.6;
+        ctx.fillStyle = '#000000';
+        ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+        ctx.globalAlpha = 1;
+
+        ctx.globalAlpha = fadeAlpha;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+
+        // "GAME OVER"
+        ctx.fillStyle = '#e94560';
+        ctx.font = 'bold 48px monospace';
+        ctx.fillText('GAME OVER', CANVAS_W / 2, CANVAS_H / 2 - 50);
+
+        // Score
+        ctx.fillStyle = '#ffffff';
+        ctx.font = 'bold 20px monospace';
+        ctx.fillText('SCORE: ' + String(score).padStart(4, '0'), CANVAS_W / 2, CANVAS_H / 2);
+
+        // High score
+        ctx.fillStyle = '#ffd700';
+        ctx.font = '16px monospace';
+        if (isNewHighScore) {
+          const glow = 0.6 + Math.sin(frameTick * 0.12) * 0.4;
+          ctx.globalAlpha = fadeAlpha * glow;
+          ctx.font = 'bold 18px monospace';
+          if (highScoreRank === 0) {
+            ctx.fillText('NEW #1 HIGH SCORE!', CANVAS_W / 2, CANVAS_H / 2 + 30);
+          } else {
+            ctx.fillText('NEW TOP ' + (highScoreRank + 1) + ' SCORE!', CANVAS_W / 2, CANVAS_H / 2 + 30);
+          }
+          ctx.globalAlpha = fadeAlpha;
+        } else {
+          ctx.fillText('HIGH SCORE: ' + String(highScore).padStart(4, '0'), CANVAS_W / 2, CANVAS_H / 2 + 30);
+        }
+
+        // Pulsing "Tap to try again"
+        if (gameOverTimer > 60) {
+          const pulse = 0.5 + Math.sin(frameTick * 0.08) * 0.5;
+          ctx.globalAlpha = fadeAlpha * pulse;
+          ctx.fillStyle = '#f5e0c8';
+          ctx.font = '14px monospace';
+          ctx.fillText('Tap or press SPACE to try again', CANVAS_W / 2, CANVAS_H / 2 + 75);
+        }
+        ctx.globalAlpha = 1;
+      }
+
+    } else if (gameState === State.WIN) {
+      ctx.drawImage(skyCanvas, 0, 0);
+      drawPetals();
+      drawTiledLayer(farHillCanvas, FAR_TILE_W, 0.15);
+      drawTiledLayer(midCanvas, MID_TILE_W, 0.4);
+      drawTiledLayer(groundCanvas, GND_TILE_W, 1.0);
+
+      // Draw altar (behind characters)
+      if (winPhase >= 1) drawAltar(altarX);
+
+      // Draw Anthony at altar (lean toward bride during kiss)
+      if (winPhase >= 1) {
+        if (winPhase >= 3) {
+          ctx.save();
+          ctx.translate(anthonyX, GROUND_Y);
+          ctx.rotate(-0.15); // lean left toward bride
+          drawGroom(0, 0);
+          ctx.restore();
+        } else {
+          drawGroom(anthonyX, GROUND_Y);
+        }
+      }
+
+      // Draw Amanda (lean toward groom during kiss)
+      if (winPhase >= 3) {
+        ctx.save();
+        ctx.translate(player.x, player.y);
+        ctx.rotate(0.15); // lean right toward groom
+        drawBride(0, 0, player.animFrame, false, null);
+        ctx.restore();
+      } else {
+        drawBride(player.x, player.y, player.animFrame, false, null);
+      }
+
+      // Big heart above the couple (phases 3+)
+      if (winPhase >= 3 && kissHeartScale > 0) {
+        const meetX = (player.x + anthonyX) / 2;
+        const heartY = GROUND_Y - 50 - kissHeartScale * 20;
+        drawBigHeart(meetX, heartY, kissHeartScale);
+      }
+
+      // Confetti (phases 3+)
+      for (const c of confetti) {
+        const alpha = Math.min(c.life / 30, 1);
+        ctx.globalAlpha = alpha;
+        ctx.fillStyle = c.color;
+        ctx.save();
+        ctx.translate(c.x, c.y);
+        ctx.rotate(c.spin * frameTick);
+        ctx.fillRect(-c.size / 2, -c.size / 2, c.size, c.size);
+        ctx.restore();
+      }
+      ctx.globalAlpha = 1;
+
+      // White screen flash
+      if (screenFlash > 0) {
+        ctx.globalAlpha = screenFlash;
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+        ctx.globalAlpha = 1;
+      }
+
+      // Phase 5: overlay with final text
+      if (winPhase === 5) {
+        const fadeAlpha = Math.min(winTimer / 60, 1);
+
+        // Dark overlay
+        ctx.globalAlpha = fadeAlpha * 0.55;
+        ctx.fillStyle = '#000000';
+        ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+        ctx.globalAlpha = 1;
+
+        ctx.globalAlpha = fadeAlpha;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+
+        // "Amanda & Anthony"
+        ctx.fillStyle = '#ffd700';
+        ctx.font = 'bold 44px monospace';
+        ctx.fillText('Amanda & Anthony', CANVAS_W / 2, CANVAS_H / 2 - 50);
+
+        // "See you November 14!"
+        ctx.fillStyle = '#ffffff';
+        ctx.font = 'bold 22px monospace';
+        ctx.fillText('See you November 14!', CANVAS_W / 2, CANVAS_H / 2 - 5);
+
+        // Time + score breakdown
+        const secs = (playFrames / 60).toFixed(1);
+        ctx.fillStyle = '#f5e0c8';
+        ctx.font = '14px monospace';
+        ctx.fillText('Time: ' + secs + 's', CANVAS_W / 2, CANVAS_H / 2 + 22);
+        ctx.fillText('Score: ' + score + ' x ' + timeBonus + ' speed bonus', CANVAS_W / 2, CANVAS_H / 2 + 40);
+        ctx.fillStyle = '#ffd700';
+        ctx.font = 'bold 18px monospace';
+        ctx.fillText('FINAL SCORE: ' + String(finalScore).padStart(4, '0'), CANVAS_W / 2, CANVAS_H / 2 + 62);
+
+        // High score celebration
+        if (isNewHighScore) {
+          const hsY = CANVAS_H / 2 + 85;
+          // Pulsing glow
+          const glow = 0.6 + Math.sin(frameTick * 0.12) * 0.4;
+          ctx.globalAlpha = fadeAlpha * glow;
+          ctx.fillStyle = '#ffd700';
+          ctx.font = 'bold 18px monospace';
+          if (highScoreRank === 0) {
+            ctx.fillText('NEW #1 HIGH SCORE!', CANVAS_W / 2, hsY);
+          } else {
+            ctx.fillText('NEW TOP ' + (highScoreRank + 1) + ' SCORE!', CANVAS_W / 2, hsY);
+          }
+          ctx.globalAlpha = fadeAlpha;
+        }
+
+        // Pulsing "Tap to play again"
+        if (winTimer > 90) {
+          const pulse = 0.5 + Math.sin(frameTick * 0.08) * 0.5;
+          ctx.globalAlpha = fadeAlpha * pulse;
+          ctx.fillStyle = '#ffd700';
+          ctx.font = '14px monospace';
+          ctx.fillText('Tap or press SPACE to play again', CANVAS_W / 2, CANVAS_H / 2 + (isNewHighScore ? 115 : 95));
+        }
+        ctx.globalAlpha = 1;
+      }
+    }
+
+    // Mute button (always visible)
+    drawMuteButton();
+  }
+
+  // ============================================================
+  // GAME LOOP
+  // ============================================================
+  let accumulator = 0;
+  let lastTime = performance.now();
+
+  function loop(now) {
+    const elapsed = now - lastTime;
+    lastTime = now;
+    accumulator += elapsed;
+    while (accumulator >= FIXED_DT) {
+      update(FIXED_DT);
+      accumulator -= FIXED_DT;
+    }
+    render();
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
