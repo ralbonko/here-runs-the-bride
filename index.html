@@ -32,10 +32,15 @@
 </head>
 <body>
 <canvas id="game"></canvas>
+<input id="nameInput" type="text" maxlength="12"
+  autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false"
+  style="position:fixed; top:-100px; left:0; opacity:0.01; font-size:16px; pointer-events:none; z-index:10;" />
 <script>
 (() => {
   const CANVAS_W = 800;
   const CANVAS_H = 450;
+  const isTouchDevice = ('ontouchstart' in window) || (navigator.maxTouchPoints > 0);
+  const nameInput = document.getElementById('nameInput');
   const FIXED_DT = 1000 / 60;
   const GROUND_Y = 370;
   const GRAVITY = 0.7;
@@ -357,6 +362,46 @@
   }
   playerName = loadPlayerName();
 
+  function focusNameInput() {
+    // Position input over the canvas text box so iOS Safari shows keyboard
+    const rect = canvas.getBoundingClientRect();
+    const sx = rect.width / CANVAS_W;
+    const sy = rect.height / CANVAS_H;
+    const boxW = 220, boxH = 36;
+    const boxX = CANVAS_W / 2 - boxW / 2;
+    const boxY = CANVAS_H / 2 - boxH / 2;
+    nameInput.style.position = 'fixed';
+    nameInput.style.left = (rect.left + boxX * sx) + 'px';
+    nameInput.style.top = (rect.top + boxY * sy) + 'px';
+    nameInput.style.width = (boxW * sx) + 'px';
+    nameInput.style.height = (boxH * sy) + 'px';
+    nameInput.style.opacity = '0.01';
+    nameInput.style.pointerEvents = 'auto';
+    nameInput.style.zIndex = '10';
+    nameInput.focus();
+  }
+
+  function hideNameInput() {
+    nameInput.blur();
+    nameInput.style.top = '-100px';
+    nameInput.style.pointerEvents = 'none';
+  }
+
+  function submitName() {
+    if (nameEntryBuffer.trim().length > 0) {
+      playerName = nameEntryBuffer.trim();
+      savePlayerName(playerName);
+      hideNameInput();
+      if (nameEntryIsChange) {
+        gameState = State.TITLE;
+      } else {
+        gameState = State.READY;
+        readyTimer = 0;
+        if (firstPlay) { jumpHintTimer = 180; firstPlay = false; }
+      }
+    }
+  }
+
   // Game over sequence
   // Phases: 0=stumble (15 frames), 1=pause (30 frames), 2=overlay fade
   let gameOverPhase = 0;
@@ -412,6 +457,10 @@
     jumpsLeft: 2,
   };
 
+  // Dog companion (trails behind bride)
+  const DOG_OFFSET = -40;
+  const dog = { x: 80, y: GROUND_Y, animFrame: 0, animTimer: 0 };
+
   // ============================================================
   // RESET
   // ============================================================
@@ -464,6 +513,7 @@
     player.jumpsLeft = 2;
     player.animFrame = 0;
     player.animTimer = 0;
+    dog.x = 80; dog.y = GROUND_Y; dog.animFrame = 0; dog.animTimer = 0;
     // Stop any playing music (game music, bridal chorus) and start title music
     stopMusic();
     stopBridalChorus();
@@ -511,6 +561,7 @@
     player.jumpsLeft = 2;
     player.animFrame = 0;
     player.animTimer = 0;
+    dog.x = player.x + DOG_OFFSET; dog.y = GROUND_Y; dog.animFrame = 0; dog.animTimer = 0;
     gameState = State.READY;
     readyTimer = 0;
     stopMusic();
@@ -534,6 +585,8 @@
         gameState = State.NAME_ENTRY;
         nameEntryBuffer = '';
         nameEntryIsChange = false;
+        nameInput.value = '';
+        focusNameInput();
       } else {
         gameState = State.READY;
         readyTimer = 0;
@@ -558,20 +611,14 @@
     // Name entry keyboard handling
     if (gameState === State.NAME_ENTRY) {
       e.preventDefault();
-      if (e.code === 'Enter' && nameEntryBuffer.trim().length > 0) {
-        playerName = nameEntryBuffer.trim();
-        savePlayerName(playerName);
-        if (nameEntryIsChange) {
-          gameState = State.TITLE;
-        } else {
-          gameState = State.READY;
-          readyTimer = 0;
-          if (firstPlay) { jumpHintTimer = 180; firstPlay = false; }
-        }
+      if (e.code === 'Enter') {
+        submitName();
       } else if (e.code === 'Backspace') {
         nameEntryBuffer = nameEntryBuffer.slice(0, -1);
+        nameInput.value = nameEntryBuffer;
       } else if (e.key.length === 1 && nameEntryBuffer.length < 12) {
         nameEntryBuffer += e.key;
+        nameInput.value = nameEntryBuffer;
       }
       return;
     }
@@ -590,6 +637,8 @@
       gameState = State.NAME_ENTRY;
       nameEntryBuffer = playerName || '';
       nameEntryIsChange = true;
+      nameInput.value = nameEntryBuffer;
+      focusNameInput();
       return;
     }
     if (e.code === 'Space' || e.code === 'Enter') {
@@ -601,17 +650,57 @@
       jumpRequested = true;
     }
   });
+  function handleTapOrClick(c) {
+    if (isMuteClick(c.x, c.y)) { initAudio(); muted = !muted; updateMusicMute(); return; }
+    // NAME_ENTRY: confirm button or re-focus input
+    if (gameState === State.NAME_ENTRY) {
+      const btnW = 140, btnH = 32;
+      const btnX = CANVAS_W / 2 - btnW / 2, btnY = CANVAS_H / 2 + 30;
+      if (c.x >= btnX && c.x <= btnX + btnW && c.y >= btnY && c.y <= btnY + btnH) {
+        submitName();
+      } else {
+        setTimeout(() => focusNameInput(), 50);
+      }
+      return;
+    }
+    // TITLE: tap targets for [H] and [N]
+    if (gameState === State.TITLE && hasInteracted) {
+      const hitTop = CANVAS_H - 30, hitBot = CANVAS_H;
+      if (c.x >= 300 && c.x <= 500 && c.y >= hitTop && c.y <= hitBot) {
+        gameState = State.HELP; return;
+      }
+      if (playerName && c.x >= 0 && c.x <= 300 && c.y >= hitTop && c.y <= hitBot) {
+        gameState = State.NAME_ENTRY;
+        nameEntryBuffer = playerName || '';
+        nameEntryIsChange = true;
+        nameInput.value = nameEntryBuffer;
+        focusNameInput();
+        return;
+      }
+    }
+    handleAction();
+  }
   canvas.addEventListener('touchstart', (e) => {
     e.preventDefault();
     const touch = e.touches[0];
     const c = getCanvasCoords(touch.clientX, touch.clientY);
-    if (isMuteClick(c.x, c.y)) { initAudio(); muted = !muted; updateMusicMute(); return; }
-    handleAction();
+    handleTapOrClick(c);
   }, { passive: false });
   canvas.addEventListener('click', (e) => {
     const c = getCanvasCoords(e.clientX, e.clientY);
-    if (isMuteClick(c.x, c.y)) { initAudio(); muted = !muted; updateMusicMute(); return; }
-    handleAction();
+    handleTapOrClick(c);
+  });
+
+  // Hidden input sync for mobile name entry
+  nameInput.addEventListener('input', () => {
+    nameEntryBuffer = nameInput.value.slice(0, 12);
+  });
+  nameInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && gameState === State.NAME_ENTRY) {
+      e.preventDefault();
+      e.stopPropagation();
+      submitName();
+    }
   });
 
   // ============================================================
@@ -1120,9 +1209,15 @@
         player.animTimer = 0;
         player.animFrame = 1 - player.animFrame;
       }
+      // Dog follows
+      dog.x = player.x + DOG_OFFSET;
+      dog.y = GROUND_Y;
+      dog.animTimer++;
+      if (dog.animTimer >= 6) { dog.animTimer = 0; dog.animFrame = (dog.animFrame + 1) % 3; }
       if (player.x >= AMANDA_MEET_X) {
         player.x = AMANDA_MEET_X;
         player.animFrame = 0;
+        dog.animFrame = 0; // stop trotting
         winPhase = 3;
         winTimer = 0;
         // Kiss moment: flash + confetti burst
@@ -1291,6 +1386,17 @@
         player.animTimer = 0;
         player.animFrame = 1 - player.animFrame;
       }
+    }
+
+    // Dog follow logic
+    dog.x = player.x + DOG_OFFSET;
+    dog.y += (player.y - dog.y) * 0.35; // lerp for trailing bounce
+    if (dog.y > GROUND_Y) dog.y = GROUND_Y;
+    // Tri-trot animation (3 frames, faster cycle for bouncy feel)
+    dog.animTimer++;
+    if (dog.animTimer >= 6) {
+      dog.animTimer = 0;
+      dog.animFrame = (dog.animFrame + 1) % 3;
     }
 
     // --- Obstacle spawning (with pattern system) ---
@@ -1763,6 +1869,75 @@
     px(-1,-1,SH); px(0,-1,SH); px(1,-1,SH);
     // Shoes
     px(-1,0,'#1a1a1a'); px(1,0,'#1a1a1a');
+  }
+
+  // ============================================================
+  // DRAW DOG (Blue Merle Australian Shepherd)
+  // ============================================================
+  function drawDog(cx, feetY, frame, sitting) {
+    const bob = (!sitting && frame === 1) ? -2 : 0; // bounce up on frame 1 (tri-trot)
+    const by = feetY + bob;
+    function px(col, row, color) {
+      ctx.fillStyle = color;
+      ctx.fillRect(cx + col*P, by + row*P, P, P);
+    }
+    const BG='#7B8D9E'; // blue-grey
+    const BK='#2a2a2a'; // black patches
+    const WH='#ffffff'; // white markings
+    const NS='#1a1a1a'; // nose
+    const ER='#d4a08a'; // inner ear pink
+
+    // Tail (wagging based on frameTick)
+    const tailWag = Math.sin(frameTick * 0.3) > 0;
+    if (sitting) {
+      // Sitting tail curls up
+      px(-4, -3, BG); px(-5, -4, BG);
+    } else {
+      if (tailWag) { px(-4,-4,BG); px(-5,-5,BG); }
+      else { px(-4,-3,BG); px(-5,-3,BK); }
+    }
+
+    if (sitting) {
+      // === SITTING POSE ===
+      // Head
+      px(1,-5,BG); px(2,-5,BK); // ears
+      px(0,-4,BG); px(1,-4,BG); px(2,-4,BG);
+      px(0,-3,WH); px(1,-3,BG); px(2,-3,BK);
+      px(2,-4,BK); // black patch on head
+      px(3,-4,NS); // nose tip
+      // Body (compact sitting)
+      px(-1,-2,BG); px(0,-2,BG); px(1,-2,BG); px(2,-2,WH);
+      px(-2,-2,BK);
+      px(-2,-1,BG); px(-1,-1,BG); px(0,-1,WH); px(1,-1,BG);
+      // Paws
+      px(-1,0,WH); px(1,0,WH);
+    } else {
+      // === RUNNING POSE ===
+      // Head (facing right)
+      px(2,-5,BG); px(3,-5,BK); // ears (pointed)
+      px(1,-4,BG); px(2,-4,BG); px(3,-4,BG);
+      px(1,-3,WH); px(2,-3,BG); px(3,-3,BK); // face with white blaze
+      px(4,-3,NS); // nose
+
+      // Body
+      px(-2,-3,BK); px(-1,-3,BG); px(0,-3,BG);
+      px(-3,-2,BK); px(-2,-2,BG); px(-1,-2,BG); px(0,-2,BG); px(1,-2,BG);
+      px(-3,-1,BG); px(-2,-1,BG); px(-1,-1,WH); px(0,-1,BG); px(1,-1,BG);
+
+      // Legs (tri-trot: 3 frames)
+      if (frame === 0) {
+        // Extended stride: front forward, back backward
+        px(2,-1,BG); px(2,0,WH); // front leg forward
+        px(-3,0,WH); // back leg back
+      } else if (frame === 1) {
+        // Bunched: legs underneath (bounce phase)
+        px(0,0,WH); px(1,0,WH); // legs together
+      } else {
+        // Opposite stride: front back, back forward
+        px(-1,0,WH); // front leg back
+        px(-4,0,WH); px(2,0,WH); // back leg forward-ish
+      }
+    }
   }
 
   // ============================================================
@@ -2519,8 +2694,11 @@
       }
       ctx.globalAlpha = 1;
 
-      // Amanda (left of center) facing right
+      // Dog (sitting beside Amanda on title screen)
       const amandaTitleX = CANVAS_W / 2 - 40;
+      drawDog(amandaTitleX - 30, GROUND_Y, 0, true);
+
+      // Amanda (left of center) facing right
       drawBride(amandaTitleX, GROUND_Y, 0, false, null);
 
       // Anthony (right of center) facing left
@@ -2582,7 +2760,9 @@
         ctx.font = '16px monospace';
         ctx.fillStyle = '#ffffff';
         ctx.textAlign = 'center';
-        const promptText = hasInteracted ? 'Press SPACE or Tap to Start' : '\u266b Tap anywhere to begin \u266b';
+        const promptText = hasInteracted
+          ? (isTouchDevice ? 'Tap to Start' : 'Press SPACE or Tap to Start')
+          : '\u266b Tap anywhere to begin \u266b';
         ctx.fillText(promptText, CANVAS_W / 2, CANVAS_H - 38);
       }
 
@@ -2592,12 +2772,12 @@
       const bottomY = CANVAS_H - 14;
       if (playerName) {
         ctx.textAlign = 'left';
-        ctx.fillText(playerName + '  [N] Change Name', 16, bottomY);
+        ctx.fillText(playerName + (isTouchDevice ? '  \u270e Change Name' : '  [N] Change Name'), 16, bottomY);
       }
       ctx.textAlign = 'center';
-      ctx.fillText('[H] How to Play', CANVAS_W / 2, bottomY);
+      ctx.fillText(isTouchDevice ? 'How to Play' : '[H] How to Play', CANVAS_W / 2, bottomY);
       ctx.textAlign = 'right';
-      ctx.fillText('[M] ' + (muted ? 'Unmute' : 'Mute'), CANVAS_W - 50, bottomY);
+      ctx.fillText(isTouchDevice ? (muted ? 'Unmute' : 'Mute') : '[M] ' + (muted ? 'Unmute' : 'Mute'), CANVAS_W - 50, bottomY);
 
     } else if (gameState === State.HELP) {
       // How to Play screen
@@ -2735,7 +2915,7 @@
         ctx.textAlign = 'center';
         ctx.font = '14px monospace';
         ctx.fillStyle = '#f5e0c8';
-        ctx.fillText('Press SPACE, H, or Tap to go back', CANVAS_W / 2, CANVAS_H - 20);
+        ctx.fillText(isTouchDevice ? 'Tap to go back' : 'Press SPACE, H, or Tap to go back', CANVAS_W / 2, CANVAS_H - 20);
       }
 
     } else if (gameState === State.NAME_ENTRY) {
@@ -2774,10 +2954,22 @@
       const cursor = Math.floor(frameTick / 30) % 2 === 0 ? '|' : '';
       ctx.fillText(nameEntryBuffer + cursor, CANVAS_W / 2, CANVAS_H / 2);
 
+      // Confirm button
+      const btnW = 140, btnH = 32;
+      const btnX = CANVAS_W / 2 - btnW / 2, btnY = CANVAS_H / 2 + 30;
+      ctx.fillStyle = 'rgba(255,215,0,0.25)';
+      ctx.fillRect(btnX, btnY, btnW, btnH);
+      ctx.strokeStyle = '#ffd700';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(btnX, btnY, btnW, btnH);
+      ctx.font = 'bold 16px monospace';
+      ctx.fillStyle = '#ffd700';
+      ctx.fillText('CONFIRM', CANVAS_W / 2, btnY + btnH / 2);
+
       // Instructions
       ctx.font = '14px monospace';
       ctx.fillStyle = '#f5e0c8';
-      ctx.fillText('Press ENTER to confirm', CANVAS_W / 2, CANVAS_H / 2 + 50);
+      ctx.fillText(isTouchDevice ? 'Tap CONFIRM when ready' : 'Press ENTER to confirm', CANVAS_W / 2, CANVAS_H / 2 + 80);
 
     } else if (gameState === State.READY) {
       // "GET READY!" → "LET'S GO!" countdown screen
@@ -2910,6 +3102,7 @@
       } else if (flashTimer > 0 && Math.floor(frameTick/3)%2===0) {
         tint = '#ff3333';
       }
+      drawDog(dog.x, dog.y, dog.animFrame, false);
       drawBride(player.x, player.y, player.animFrame, !player.grounded, tint);
 
       // Particles (on top)
@@ -2959,6 +3152,9 @@
       for (const obs of obstacles) drawObstacle(obs);
       for (const ff of flamingFlowers) drawFlamingFlower(ff);
       for (const col of collectibles) drawCollectible(col);
+
+      // Dog (sitting during game over)
+      drawDog(dog.x, dog.y, 0, true);
 
       // Amanda stumble animation
       if (gameOverPhase === 0) {
@@ -3029,7 +3225,7 @@
           ctx.globalAlpha = fadeAlpha * pulse;
           ctx.fillStyle = '#f5e0c8';
           ctx.font = '14px monospace';
-          ctx.fillText('Tap or press SPACE to try again', CANVAS_W / 2, CANVAS_H / 2 + 75);
+          ctx.fillText(isTouchDevice ? 'Tap to try again' : 'Tap or press SPACE to try again', CANVAS_W / 2, CANVAS_H / 2 + 75);
         }
         ctx.globalAlpha = 1;
       }
@@ -3056,6 +3252,9 @@
           drawGroom(anthonyX, GROUND_Y);
         }
       }
+
+      // Draw dog (sitting during kiss, trotting otherwise)
+      drawDog(dog.x, dog.y, dog.animFrame, winPhase >= 3);
 
       // Draw Amanda (lean toward groom during kiss)
       if (winPhase >= 3) {
@@ -3152,7 +3351,7 @@
           ctx.globalAlpha = fadeAlpha * pulse;
           ctx.fillStyle = '#ffd700';
           ctx.font = '14px monospace';
-          ctx.fillText('Tap or press SPACE to play again', CANVAS_W / 2, CANVAS_H / 2 + (isNewHighScore ? 115 : 95));
+          ctx.fillText(isTouchDevice ? 'Tap to play again' : 'Tap or press SPACE to play again', CANVAS_W / 2, CANVAS_H / 2 + (isNewHighScore ? 115 : 95));
         }
         ctx.globalAlpha = 1;
       }
