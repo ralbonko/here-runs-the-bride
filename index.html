@@ -29,6 +29,8 @@
     user-select: none;
   }
 </style>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
 </head>
 <body>
 <canvas id="game"></canvas>
@@ -37,6 +39,17 @@
   style="position:fixed; top:-100px; left:0; opacity:0.01; font-size:16px; pointer-events:none; z-index:10;" />
 <script>
 (() => {
+  // Firebase init
+  const firebaseApp = firebase.initializeApp({
+    apiKey: "AIzaSyDLdA6SEvTb_B-JI44nG5xqLCa8D1VElUw",
+    authDomain: "here-runs-the-bride.firebaseapp.com",
+    projectId: "here-runs-the-bride",
+    storageBucket: "here-runs-the-bride.firebasestorage.app",
+    messagingSenderId: "182131979327",
+    appId: "1:182131979327:web:c897343a5f6a31293bb48a"
+  });
+  const db = firebase.firestore();
+
   const CANVAS_W = 800;
   const CANVAS_H = 450;
   const isTouchDevice = ('ontouchstart' in window) || (navigator.maxTouchPoints > 0);
@@ -306,12 +319,33 @@
 
   // Persistent top-10 leaderboard (entries: {score, name})
   const LS_KEY = 'hctb-top-scores';
+  let globalScores = [];
+  let globalScoresLoaded = false;
+
+  function fetchGlobalScores() {
+    db.collection('scores')
+      .orderBy('score', 'desc')
+      .limit(10)
+      .get()
+      .then(snapshot => {
+        globalScores = snapshot.docs.map(doc => ({
+          score: doc.data().score,
+          name: doc.data().name || '???'
+        }));
+        globalScoresLoaded = true;
+        saveTopScores(globalScores);
+        highScore = globalScores.length > 0 ? globalScores[0].score : 0;
+      })
+      .catch(err => console.warn('Firestore fetch failed:', err));
+  }
+
   function loadTopScores() {
+    if (globalScoresLoaded && globalScores.length > 0) {
+      return globalScores.slice(0, 10);
+    }
     try {
       const data = JSON.parse(localStorage.getItem(LS_KEY));
-      if (Array.isArray(data)) {
-        return data.slice(0, 10).filter(e => e && e.score > 0);
-      }
+      if (Array.isArray(data)) return data.slice(0, 10).filter(e => e && e.score > 0);
     } catch(e) {}
     return [];
   }
@@ -338,6 +372,16 @@
       highScoreRank = -1;
     }
     highScore = entries.length > 0 ? entries[0].score : 0;
+
+    // Write to Firestore (fire-and-forget)
+    if (s > 0) {
+      db.collection('scores').add({
+        name: playerName || '???',
+        score: s,
+        createdAt: firebase.firestore.FieldValue.serverTimestamp()
+      }).then(() => fetchGlobalScores())
+        .catch(err => console.warn('Firestore write failed:', err));
+    }
   }
   // One-time reset: clear old scores (format changed to {score, name})
   { try {
@@ -348,6 +392,7 @@
   } catch(e) {} }
   // Load on init
   { const entries = loadTopScores(); highScore = entries.length > 0 ? entries[0].score : 0; }
+  fetchGlobalScores();
 
   // Player name (persistent)
   const LS_NAME_KEY = 'hctb-player-name';
