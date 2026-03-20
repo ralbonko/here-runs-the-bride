@@ -385,17 +385,16 @@
   // ============================================================
   // COLLECTIBLE CONFIG
   // ============================================================
-  // 0=heart(5%), 1=ring(65%), 2=champagne(10%), 3=bouquet(5%), 4=tiara(8%), 5=magnet(7%)
+  // 0=heart(5%), 1=ring(75%), 3=bouquet(5%), 4=tiara(8%), 5=magnet(7%)
   const COLLECT_COLORS = ['#ff6b9d', '#ffd700', '#2d8a2d', '#ff69b4', '#e0b0ff', '#00e5ff'];
   const RAINBOW_COLORS = ['#ff6b9d','#ffd700','#7fff00','#00bfff','#ff69b4','#ffa500'];
   let lastEffectSpawn = 0; // frame when last effect item (2-5) spawned
   let spawnedEffects = new Set(); // track which effect types (2-5) have appeared
   // Guarantee each effect spawns at least once by these distance thresholds
   const EFFECT_GUARANTEES = [
-    { type: 2, dist: 3000 },  // Champagne by 3000
-    { type: 4, dist: 5000 },  // Tiara by 5000
-    { type: 5, dist: 7000 },  // Magnet by 7000
-    { type: 3, dist: 9000 },  // Bouquet by 9000
+    { type: 4, dist: 3000 },  // Tiara by 3000
+    { type: 5, dist: 5000 },  // Magnet by 5000
+    { type: 3, dist: 7000 },  // Bouquet by 7000
   ];
 
   function pickCollectType() {
@@ -411,8 +410,7 @@
     const base = distanceTraveled > 3000 ? 0.05 : 0;
     // If an effect item spawned recently (within ~4s), force a ring
     const effectCooldown = frameTick - lastEffectSpawn < 240;
-    if (effectCooldown || r < base + 0.65) return 1; // Ring 65%
-    if (r < base + 0.75) return 2;  // Champagne 10%
+    if (effectCooldown || r < base + 0.75) return 1; // Ring 75%
     if (r < base + 0.80) return 3;  // Bouquet 5%
     if (r < base + 0.88) return 4;  // Tiara 8%
     return 5;                        // Magnet 7%
@@ -583,12 +581,16 @@
   let collectibles = [];
   let collectSpawnTimer = 60;
 
-  // Champagne boost
-  let boostTimer = 0;
+  // Platforms (disabled for now — set to true to enable)
+  const PLATFORMS_ENABLED = false;
+  let platforms = [];
+  let platformSpawnTimer = 200;
+
+  // Power-up timers
+  let boostTimer = 0;       // kept for code compatibility, no longer used
   let invincibleTimer = 0;
   let multiplierTimer = 0;  // Tiara 2x score (480 frames = 8s)
   let magnetTimer = 0;      // Magnet pull (300 frames = 5s)
-  let champagneCount = 0;   // Track champagnes for speed bonus
 
   // Particles, sparkles, floating text
   let particles = [];
@@ -654,11 +656,13 @@
     shakeTimer = 0;
     collectibles = [];
     collectSpawnTimer = 60;
+    platforms = [];
+    platformSpawnTimer = 200;
     boostTimer = 0;
     invincibleTimer = 0;
     multiplierTimer = 0;
     magnetTimer = 0;
-    champagneCount = 0;
+
     lastEffectSpawn = 0;
     spawnedEffects = new Set();
     particles = [];
@@ -710,11 +714,13 @@
     shakeTimer = 0;
     collectibles = [];
     collectSpawnTimer = 60;
+    platforms = [];
+    platformSpawnTimer = 200;
     boostTimer = 0;
     invincibleTimer = 0;
     multiplierTimer = 0;
     magnetTimer = 0;
-    champagneCount = 0;
+
     lastEffectSpawn = 0;
     spawnedEffects = new Set();
     particles = [];
@@ -1477,15 +1483,14 @@
 
     // Speed
     gameSpeed = Math.min(BASE_SPEED + distanceTraveled * SPEED_INCREASE, MAX_SPEED);
-    effectiveSpeed = boostTimer > 0 ? gameSpeed * 2 : gameSpeed;
+    effectiveSpeed = gameSpeed;
     distanceTraveled += effectiveSpeed;
     scrollX += effectiveSpeed;
 
     // Win condition — start sequence
     if (distanceTraveled >= WIN_DISTANCE) {
-      // Speed bonus: based on champagne boosts collected
-      timeBonus = Math.min(1.0 + champagneCount * 0.5, 4.0);
-      finalScore = Math.round(score * timeBonus);
+      timeBonus = 1;
+      finalScore = score;
       submitScore(finalScore);
       stopMusic();
       gameState = State.WIN;
@@ -1497,8 +1502,6 @@
       return;
     }
 
-    // Boost countdown
-    if (boostTimer > 0) boostTimer--;
     if (invincibleTimer > 0) invincibleTimer--;
     if (multiplierTimer > 0) multiplierTimer--;
     if (magnetTimer > 0) magnetTimer--;
@@ -1546,6 +1549,31 @@
           });
         }
       }
+      // Platform landing (one-way: only land from above while falling)
+      if (player.vy >= 0 && !player.grounded) {
+        for (const plat of platforms) {
+          const onTop = player.x >= plat.x && player.x <= plat.x + plat.w;
+          const feetAt = player.y;
+          const prevFeet = player.y - player.vy;
+          if (onTop && prevFeet <= plat.y && feetAt >= plat.y) {
+            player.y = plat.y;
+            player.vy = 0;
+            player.grounded = true;
+            player.jumpsLeft = 2;
+            break;
+          }
+        }
+      }
+    }
+    // Fall off platform edge
+    if (player.grounded && player.y < GROUND_Y) {
+      let onAny = false;
+      for (const plat of platforms) {
+        if (player.x >= plat.x && player.x <= plat.x + plat.w && Math.abs(player.y - plat.y) < 2) {
+          onAny = true; break;
+        }
+      }
+      if (!onAny) { player.grounded = false; }
     }
 
     // Run anim
@@ -1651,6 +1679,21 @@
       if (ff.x < -20 || ff.y > GROUND_Y + 10) flamingFlowers.splice(i, 1);
     }
 
+    // --- Platform spawning ---
+    if (PLATFORMS_ENABLED) platformSpawnTimer--;
+    if (PLATFORMS_ENABLED && platformSpawnTimer <= 0 && distanceTraveled > 1500) {
+      const heights = [GROUND_Y - 55, GROUND_Y - 85, GROUND_Y - 115];
+      const h = heights[Math.floor(Math.random() * heights.length)];
+      const w = 80 + Math.floor(Math.random() * 100);
+      platforms.push({ x: CANVAS_W + 10, y: h, w: w, h: GROUND_Y - h });
+      platformSpawnTimer = 250 + Math.floor(Math.random() * 200);
+    }
+    // --- Move platforms ---
+    for (let i = platforms.length - 1; i >= 0; i--) {
+      platforms[i].x -= effectiveSpeed;
+      if (platforms[i].x + platforms[i].w < -20) platforms.splice(i, 1);
+    }
+
     // --- Collectible spawning ---
     collectSpawnTimer--;
     if (collectSpawnTimer <= 0) {
@@ -1713,12 +1756,6 @@
           case 1: // Ring — 25 pts
             score += 25 * mult;
             floatingTexts.push({ x: ccx, y: ccy, text: '+' + (25 * mult), life: 40 });
-            break;
-          case 2: // Champagne — speed boost
-            boostTimer = 120;
-            champagneCount++;
-            score += 10 * mult;
-            floatingTexts.push({ x: ccx, y: ccy, text: '+' + (10 * mult), life: 40 });
             break;
           case 3: // Bouquet — invincibility
             invincibleTimer = 300;
@@ -2107,6 +2144,36 @@
         px(-4,0,WH); px(2,0,WH); // back leg forward-ish
       }
     }
+  }
+
+  // ============================================================
+  // DRAW PLATFORM
+  // ============================================================
+  function drawPlatform(plat) {
+    const brickW = 24, brickH = 16;
+    const rows = Math.ceil(plat.h / brickH);
+    const cols = Math.ceil(plat.w / brickW);
+    for (let r = 0; r < rows; r++) {
+      const offset = (r % 2 === 0) ? 0 : brickW / 2;
+      for (let c = -1; c <= cols; c++) {
+        const bx = plat.x + c * brickW + offset;
+        const by = plat.y + r * brickH;
+        if (bx + brickW < plat.x || bx > plat.x + plat.w) continue;
+        const clampL = Math.max(bx, plat.x);
+        const clampR = Math.min(bx + brickW, plat.x + plat.w);
+        const clampT = Math.max(by, plat.y);
+        const clampB = Math.min(by + brickH, GROUND_Y);
+        if (clampR <= clampL || clampB <= clampT) continue;
+        ctx.fillStyle = r === 0 ? '#c9a87c' : '#b8956a';
+        ctx.fillRect(clampL, clampT, clampR - clampL, clampB - clampT);
+        ctx.strokeStyle = '#8b7355';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(clampL + 0.5, clampT + 0.5, clampR - clampL - 1, clampB - clampT - 1);
+      }
+    }
+    // Top edge highlight
+    ctx.fillStyle = '#d4b896';
+    ctx.fillRect(plat.x, plat.y, plat.w, 3);
   }
 
   // ============================================================
@@ -3209,7 +3276,8 @@
       drawTiledLayer(midCanvas, MID_TILE_W, 0.4);
       drawTiledLayer(groundCanvas, GND_TILE_W, 1.0);
 
-      // Obstacles
+      // Platforms & Obstacles
+      for (const plat of platforms) drawPlatform(plat);
       for (const obs of obstacles) drawObstacle(obs);
       for (const ff of flamingFlowers) drawFlamingFlower(ff);
 
@@ -3318,6 +3386,7 @@
       drawTiledLayer(farHillCanvas, FAR_TILE_W, 0.15);
       drawTiledLayer(midCanvas, MID_TILE_W, 0.4);
       drawTiledLayer(groundCanvas, GND_TILE_W, 1.0);
+      for (const plat of platforms) drawPlatform(plat);
       for (const obs of obstacles) drawObstacle(obs);
       for (const ff of flamingFlowers) drawFlamingFlower(ff);
       for (const col of collectibles) drawCollectible(col);
