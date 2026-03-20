@@ -29,17 +29,21 @@
     user-select: none;
   }
   #rotateOverlay {
-    display: none;
     position: fixed;
     top: 0; left: 0; right: 0; bottom: 0;
     z-index: 99999;
     background: linear-gradient(135deg, #ffb6c1, #ffc0cb);
+    display: flex;
     justify-content: center;
     align-items: center;
     flex-direction: column;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.8s ease;
   }
-  @media (orientation: portrait) and (max-width: 900px) {
-    #rotateOverlay { display: flex; }
+  #rotateOverlay.visible {
+    opacity: 1;
+    pointer-events: auto;
   }
   .rotate-content { text-align: center; }
   .rotate-icon {
@@ -142,19 +146,60 @@
   resize();
   document.addEventListener('touchmove', (e) => e.preventDefault(), { passive: false });
   document.addEventListener('gesturestart', (e) => e.preventDefault());
+  window.addEventListener('orientationchange', () => {
+    setTimeout(resize, 150);
+  });
+  if (window.visualViewport) {
+    window.visualViewport.addEventListener('resize', resize);
+  }
 
   // Orientation overlay — pause game when portrait on mobile
   const portraitQuery = window.matchMedia('(orientation: portrait) and (max-width: 900px)');
+  const rotateOverlay = document.getElementById('rotateOverlay');
   let pausedByOrientation = false;
-  function handleOrientationChange(mq) {
-    if (mq.matches) {
+  let hasShownOverlay = false;
+  let overlayDelayTimer = null;
+
+  function showOverlay(immediate) {
+    if (immediate) {
+      rotateOverlay.classList.add('visible');
       pausedByOrientation = true;
-    } else if (pausedByOrientation) {
+    } else {
+      overlayDelayTimer = setTimeout(() => {
+        rotateOverlay.classList.add('visible');
+        pausedByOrientation = true;
+        overlayDelayTimer = null;
+      }, 1500);
+    }
+  }
+
+  function hideOverlay() {
+    if (overlayDelayTimer) {
+      clearTimeout(overlayDelayTimer);
+      overlayDelayTimer = null;
+    }
+    rotateOverlay.classList.remove('visible');
+    if (pausedByOrientation) {
       pausedByOrientation = false;
       lastTime = performance.now();
       accumulator = 0;
     }
+    resize();
   }
+
+  function handleOrientationChange(mq) {
+    if (mq.matches) {
+      if (!hasShownOverlay) {
+        hasShownOverlay = true;
+        showOverlay(false);
+      } else {
+        showOverlay(true);
+      }
+    } else {
+      hideOverlay();
+    }
+  }
+
   portraitQuery.addEventListener('change', handleOrientationChange);
   handleOrientationChange(portraitQuery);
 
